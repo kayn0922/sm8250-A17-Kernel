@@ -149,6 +149,20 @@ if BLOB in s:
     s = s.replace('?raw=true', '')
     print('[patch] build.sh: stabilized NonGKI_Kernel_Build_2nd raw URLs (raw.githubusercontent.com)')
 
+# 3) Workaround: upstream SUSFS version mismatch. ymdzq's build.sh applies
+#    JackA1ltman's susfs_inline_hook_patches.sh (v2.3.00), which inserts calls to
+#    susfs_is_current_proc_no_su() into fs/open.c|stat.c|exec.c. But the SUSFS
+#    kernel-side bundled by BakaSU/ReSukiSU is v2.0.0 and does NOT export that
+#    symbol -> "implicit declaration" compile error (the previous failure).
+#    Until the SUSFS side is aligned to the inline patch, disable SUSFS so build.sh
+#    takes the stable syscall-hook path (syscall_hook_patches.sh, which only calls
+#    the always-present ksu_handle_* helpers). SukiSU root still works; only the
+#    SUSFS hide-root features are dropped. To restore SUSFS later: change this back
+#    to 1 AND align the SUSFS kernel-side version with the 2.3.00 inline patch.
+if 'SUSFS_ENABLE=1' in s:
+    s = s.replace('SUSFS_ENABLE=1', 'SUSFS_ENABLE=0', 1)
+    print('[patch] build.sh: disabled SUSFS (v2.3.00 inline vs BakaSU v2.0.0 mismatch) -> syscall-hook path')
+
 open(p, 'w', encoding='utf-8').write(s)
 PY
 
