@@ -1,0 +1,107 @@
+name: Build A17 Kernel (SukiSU)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Hardware codename (elish=Pad5Pro WiFi / enuma=5G / dagu=12.4)'
+        required: true
+        default: 'enuma'
+        type: choice
+        options: [elish, enuma, dagu]
+      ksu:
+        description: 'Root solution'
+        required: true
+        default: 'ksu'
+        type: choice
+        options: [ksu, rksu, noksu]
+      target_system:
+        description: 'MIUI/HyperOS MUST use miui (AOSP build blackscreens on HyperOS)'
+        required: true
+        default: 'miui'
+        type: choice
+        options: [miui, aosp, both]
+      gps_dts_fix:
+        description: 'Experimental: inject a minimal bcm4775 GPS node into dagu DTS'
+        required: true
+        default: 'none'
+        type: choice
+        options: [none, dagu-minimal-node]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ inputs.device }} / ${{ inputs.ksu }} / ${{ inputs.target_system }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout this builder
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: Checkout upstream kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ymdzq/kernel_xiaomi_sm8250_mod
+          ref: android16-aptusitu
+          fetch-depth: 1
+          path: kernel
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl wget bison flex zip bc cpio \
+            libssl-dev ccache python-is-python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Setup ZyC-Clang 22
+        run: |
+          mkdir -p "$HOME/ZyC-clang" && cd "$HOME/ZyC-clang"
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/22.0.0git-20250924-release/Clang-22.0.0git-20250924.tar.gz
+          tar -zxvf Clang-22.0.0git-20250924.tar.gz
+          ls "$HOME/ZyC-clang/bin/clang" && "$HOME/ZyC-clang/bin/clang" --version | head -2
+
+      - name: Apply A17 compatibility + GPS kernel-side patches
+        run: |
+          bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          chmod +x build.sh
+          case "${{ inputs.target_system }}" in
+            miui) bash build.sh "${{ inputs.device }}" "${{ inputs.ksu }}" miui ;;
+            aosp) bash build.sh "${{ inputs.device }}" "${{ inputs.ksu }}" aosp ;;
+            both) bash build.sh "${{ inputs.device }}" "${{ inputs.ksu }}" ;;
+          esac
+
+      - name: Collect flashable zips
+        run: |
+          mkdir -p artifacts
+          find kernel -maxdepth 1 -name 'Kernel_*.zip' -print -exec cp {} artifacts/ \;
+          ls -lh artifacts/
+          test -n "$(ls -A artifacts/)" || { echo 'No kernel zip produced'; exit 1; }
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-${{ github.run_id }}
+          name: ${{ inputs.device }} / ${{ inputs.ksu }} / ${{ inputs.target_system }} / run ${{ github.run_id }}
+          body: |
+            Built from `ymdzq/kernel_xiaomi_sm8250_mod@android16-aptusitu`.
+            - device: `${{ inputs.device }}`
+            - root: `${{ inputs.ksu }}` (ksu = ReSukiSU + SuSFS + KPM)
+            - target: `${{ inputs.target_system }}`
+            - gps_dts_fix: `${{ inputs.gps_dts_fix }}`
+
+            **HyperOS / OS4 users: flash `Kernel_MIUI_*.zip` only.** AOSP builds blackscreen on HyperOS.
+            The zip does NOT contain dtbo.img. Keep your stock dtbo. See GPS_DIAGNOSIS.md before flashing.
+          files: artifacts/*.zip
