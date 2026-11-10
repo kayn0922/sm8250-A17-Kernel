@@ -41,7 +41,7 @@
 > GPS 表现也完全不同。
 
 **必须先确认你手里那台到底是哪一个**（`adb shell getprop ro.product.device` 或看 fastboot 机型）。
-本工程默认按你消息里写的 `enuma` 编译；若实际是 `elish` 或 `dagu`，改 workflow 的 `device` 输入重编即可。
+本工程默认**并行编译 `elish` 与 `enuma` 两份**（`devices=elish+enuma`）；只需其中一台时把 `devices` 改成对应代号，需要 12.4" 时用 `elish+enuma+dagu`。
 
 ---
 
@@ -115,19 +115,23 @@ OS4 是 HyperOS 4（Android 17）从 Pad 8 Pro / Pad 6 系列移植过来的第�
 
 | 输入 | 默认 | 说明 |
 |---|---|---|
-| `device` | `enuma` | `elish` / `enuma` / `dagu`（按**实际硬件**选） |
+| `devices` | `elish+enuma` | **并行构建**：每个代号一个 job + 一个 Release；也可单选 `elish` / `enuma`，或 `elish+enuma+dagu` |
 | `ksu` | `ksu` | `ksu`=ReSukiSU+SuSFS+KPM；`rksu`=RKSU；`noksu`=留给 Magisk/APatch |
 | `target_system` | `miui` | **HyperOS4 必须 miui**；`aosp` 仅类原生 ROM；`both` 两个都编 |
+| `stability_fixes` | `true` | 应用稳定性补丁；设 `false` 编一份未打补丁的 A/B 对照内核 |
 | `gps_dts_fix` | `none` | `dagu-minimal-node` = 给 dagu 的 DTS 注入最小 `bcm4775` 节点（实验性，见下） |
 
-命令行（本机，走 10808 代理 + REST API）：
+命令行（本机，REST API；默认直连，需要代理时设 `GH_PROXY`）：
 
 ```bash
-GH_TOKEN=<token> python scripts/github_api.py publish     # 建仓并上传工程
-GH_TOKEN=<token> python scripts/github_api.py dispatch --device enuma --ksu ksu --system miui
+GH_TOKEN=<token> python scripts/github_api.py publish
+GH_TOKEN=<token> python scripts/github_api.py dispatch --devices elish+enuma --ksu ksu --system miui --stability true
 GH_TOKEN=<token> python scripts/github_api.py status
-GH_TOKEN=<token> python scripts/github_api.py download    # 取回 Kernel_MIUI_*.zip
+GH_TOKEN=<token> python scripts/github_api.py download --devices elish,enuma
 ```
+
+> **刷错机型会黑屏 / 触控异常**：`elish` = Pad 5 Pro WiFi，`enuma` = 5G，`dagu` = 12.4"。
+> Release tag 形如 `kernel-<run_id>-<device>`，每个设备各自的 `Kernel_MIUI_<device>_*.zip`。
 
 workflow 直接浅克隆 ymdzq 内核源码 + ZyC-Clang 22，在 GitHub Actions 上编译，
 产物以 Release 里的 `Kernel_MIUI_<device>_SukiSU_*_anykernel3_*.zip` 发布。约 1–3 小时。
@@ -148,8 +152,10 @@ workflow 直接浅克隆 ymdzq 内核源码 + ZyC-Clang 22，在 GitHub Actions 
 ## 9. 文件清单
 
 ```
-.github/workflows/build-a17-kernel.yml   云编译（参数化 device/ksu/system/gps_dts_fix）
+.github/workflows/build-a17-kernel.yml   云编译（devices 矩阵并行 / ksu / system / stability_fixes / gps_dts_fix）
 scripts/apply_patches.sh                 A17 config 校验 + GPS 内核侧强制项 + 可选 DTS 补丁
+scripts/apply_stability_fixes.py        键盘 panic / cgroup / pstore 稳定性补丁（幂等，--check 校验）
+scripts/backport_patches.sh              vendor 化的 4.19 backport（build.sh 依赖）
 scripts/github_api.py                   publish / dispatch / status / download
 GPS_DIAGNOSIS.md                        GPS 分层诊断命令与修复分流
 README.md                              本文件
@@ -164,3 +170,26 @@ README.md                              本文件
 - https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod ・ https://github.com/HuberyBrook/kernel_xiaomi_sm8250_mod
 - https://github.com/ReSukiSU/ReSukiSU ・ https://sukisu.org/
 - XDA: `[ROM][UNOFFICIAL][A17][ELISH] LineageOS 24 for Xiaomi Pad 5 Pro WiFi`
+
+---
+
+## 11. 稳定性补丁（`stability_fixes=true`）
+
+`scripts/apply_stability_fixes.py` 在 `apply_patches.sh` 之后运行，幂等、按结构匹配，
+`--check` 只校验不写入；校验记录随 Release 发布为 `STABILITY_FIXES_<device>.txt`。
+三处修复均已逐行对照 `ymdzq/kernel_xiaomi_sm8250_mod@android16-aptusitu` 源码确认：
+
+| 文件 | 问题 | 修复 |
+|---|---|---|
+| `drivers/input/misc/xiaomi_keyboard/*` | `xiaomi_keyboard_remove()` 释放 `mdata`、销毁 `event_wq`，却**没有** `power_supply_unreg_notifier()`；回调里的 `if (mdata != NULL)` 恒真（`container_of` 不返回 NULL）。键盘复位后任意电源事件 → `__queue_work` 空指针 → `Kernel panic - Fatal exception` | 注销两个 notifier、先停用再销毁 workqueue、回调判空并加 `notifier_active` 状态位 |
+| `arch/arm64/configs/<device>_defconfig` | 缺 `CONFIG_CGROUP_PIDS` / `CONFIG_CGROUP_DEVICE` → A17 `init: failed write pid to memcg` | 在 `CONFIG_CGROUP_BPF=y` 后强制开启 |
+| `fs/pstore/ram.c` | `ramoops_memreserve()` 把 4M 全给 console+pmsg，`record_size=0`，pstore 永不落盘（无法留存 panic 证据） | 分配 `record_size` / `ftrace_size`，console 与 pmsg 各 1M |
+
+**边界**：这些补丁只覆盖内核侧。诊断中已经确认的框架层软重启
+（`KeyboardAuthHelper` → `com.xiaomi.devauth` → LSPosed/Thanox 篡改
+`ActiveServices.bindServiceLocked` → `system_server` 崩溃）与 vendor/system 侧
+VINTF HAL 缺失、SELinux 策略错配、`/vendor/odm/etc/setting.xml` EACCES、
+qspmhal `renameat2` 崩溃循环等，**都不是重编内核能修的**。软重启仍需禁用
+hook 系统服务的模块；完整修复应回退与本机 SKU 匹配的官方完整包。
+
+刷入前务必备份 `boot.img` / `dtbo.img` / `persist` / `/data`，并确认设备真实解锁状态。
