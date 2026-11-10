@@ -86,6 +86,9 @@ def full(me):
     return '%s/%s' % (me, REPO_NAME)
 
 
+TEXT_SUFFIXES = {'.sh', '.py', '.yml', '.yaml', '.md', '.txt', '.json', '.cfg'}
+
+
 def upload_tree(repo):
     files = [p for p in ROOT.rglob('*') if p.is_file()
              and '.git' not in p.parts and '__pycache__' not in p.parts
@@ -93,7 +96,14 @@ def upload_tree(repo):
     uploaded = 0
     for p in sorted(files):
         rel = p.relative_to(ROOT).as_posix()
-        content = base64.b64encode(p.read_bytes()).decode('ascii')
+        raw = p.read_bytes()
+        # Git for Windows may check out CRLF. Uploading that verbatim makes
+        # bash on the Ubuntu runner fail with "$'\r': command not found" and
+        # break heredoc delimiters. Always publish LF for text files.
+        if p.suffix in TEXT_SUFFIXES and b'\r\n' in raw:
+            raw = raw.replace(b'\r\n', b'\n')
+            print('  normalized CRLF -> LF: %s' % rel)
+        content = base64.b64encode(raw).decode('ascii')
         code, cur = http('GET', '/repos/%s/contents/%s?ref=%s' % (repo, rel, BRANCH))
         body = {'message': 'Add/update %s' % rel, 'content': content, 'branch': BRANCH}
         if code == 200 and isinstance(cur, dict) and cur.get('sha'):
