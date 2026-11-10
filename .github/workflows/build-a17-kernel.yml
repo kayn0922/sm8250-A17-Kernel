@@ -96,6 +96,14 @@ jobs:
           tar -zxvf Clang-22.0.0git-20250924.tar.gz
           ls "$HOME/ZyC-clang/bin/clang" && "$HOME/ZyC-clang/bin/clang" --version | head -2
 
+      - name: Normalize builder line endings (CRLF guard)
+        run: |
+          find builder -type f \( -name '*.sh' -o -name '*.py' -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.txt' \) -exec sed -i 's/\r$//' {} +
+          if grep -rl $'\r' builder/scripts builder/.github; then
+            echo 'CRLF still present in builder scripts'; exit 1
+          fi
+          echo 'builder scripts are LF'
+
       - name: Apply A17 compatibility + GPS kernel-side patches
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ matrix.device }}" "${{ inputs.gps_dts_fix }}"
