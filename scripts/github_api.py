@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """GitHub REST driver for the sm8250 A17 kernel builder.
 
-All operations go through api.github.com (usable even when github.com itself
-is blocked). Set GH_TOKEN before running; on this machine an HTTP proxy at
-127.0.0.1:10808 is used by default (override with GH_PROXY=none).
+Set GH_TOKEN before running. Direct api.github.com access is used by default;
+if your network needs a proxy, set GH_PROXY=http://127.0.0.1:10808 (or
+GH_PROXY=none to force direct).
 
 Commands:
-  publish    Create <you>/sm8250-A17-Kernel and upload this project
-  dispatch   Trigger "Build A17 Kernel (SukiSU)"
+  publish    Create/update <you>/sm8250-A17-Kernel and upload this project
+  dispatch   Trigger "Build A17 Kernel (SukiSU)" (one job per device)
   status     Show recent workflow runs
-  download   Fetch the newest Kernel_*.zip Release asset
+  download   Fetch the newest Kernel_*.zip per device from Releases
 """
 import argparse
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -37,8 +38,10 @@ if not TOKEN:
 if not TOKEN:
     sys.exit('ERROR: set GH_TOKEN (token with repo + workflow scopes)')
 
-_proxy = os.environ.get('GH_PROXY', 'http://127.0.0.1:10808')
-_handler = urllib.request.ProxyHandler({'http': _proxy, 'https': _proxy}) if _proxy not in ('', 'none') else None
+_proxy = os.environ.get('GH_PROXY', '')
+if _proxy.lower() in ('none', 'direct', 'false', 'off'):
+    _proxy = ''
+_handler = urllib.request.ProxyHandler({'http': _proxy, 'https': _proxy}) if _proxy else None
 _opener = urllib.request.build_opener(_handler) if _handler else urllib.request.build_opener()
 
 
@@ -141,8 +144,9 @@ def cmd_dispatch(args):
     me = owner()
     repo = full(me)
     wid = find_workflow(repo)
-    inputs = {'device': args.device, 'ksu': args.ksu,
-              'target_system': args.system, 'gps_dts_fix': args.gps}
+    inputs = {'devices': args.devices, 'ksu': args.ksu,
+              'target_system': args.system, 'stability_fixes': args.stability,
+              'gps_dts_fix': args.gps}
     code, d = http('POST', '/repos/%s/actions/workflows/%s/dispatches' % (repo, wid),
                    {'ref': BRANCH, 'inputs': inputs})
     print('dispatch HTTP %s (204 = accepted)' % code, '' if code in (204, 201) else d)
@@ -164,6 +168,11 @@ def cmd_status(args):
         print('  %-12s %-12s %-12s %s  %s' % (
             r['id'], r['status'], r.get('conclusion') or '-',
             r['created_at'], r['html_url']))
+    if runs:
+        code, jobs = http('GET', '/repos/%s/actions/runs/%s/jobs?per_page=20' % (repo, runs[0]['id']))
+        if code == 200:
+            for j in jobs.get('jobs', []):
+                print('    job %-42s %-12s %s' % (j['name'], j['status'], j.get('conclusion') or '-'))
     if not runs:
         print('  (none yet)')
 
@@ -171,26 +180,43 @@ def cmd_status(args):
 def cmd_download(args):
     me = owner()
     repo = full(me)
-    code, d = http('GET', '/repos/%s/releases?per_page=10' % repo)
+    wanted = [d.strip() for d in args.devices.replace('+', ',').split(',') if d.strip()]
+    if 'elish+enuma' in args.devices:
+        wanted = ['elish', 'enuma']
+    code, d = http('GET', '/repos/%s/releases?per_page=20' % repo)
     if code != 200:
         sys.exit('releases failed: %s %s' % (code, d))
+    got = set()
     for rel in d:
         for a in rel.get('assets', []):
-            if a['name'].startswith('Kernel_') and a['name'].endswith('.zip'):
-                dest = ROOT.parent / a['name']
-                print('downloading', a['name'], a['size'], 'bytes')
-                code, raw = http('GET', a['url'], accept='application/octet-stream', timeout=600)
+            name = a['name']
+            if not (name.startswith('Kernel_') and name.endswith('.zip')):
+                continue
+            m = re.match(r'Kernel_(?:MIUI|AOSP)_(elish|enuma|dagu)_', name)
+            dev = m.group(1) if m else None
+            if dev not in wanted or dev in got:
+                continue
+            dest = ROOT.parent / name
+            print('downloading', name, a['size'], 'bytes')
+            code, raw = http('GET', a['url'], accept='application/octet-stream', timeout=600)
+            try:
                 if isinstance(raw, bytes) and raw[:2] == b'PK':
                     dest.write_bytes(raw)
                 else:
-                    # assets API redirects to a signed object URL
                     req = urllib.request.Request(a['browser_download_url'],
                                                  headers={'User-Agent': 'sm8250-a17-kernel-builder'})
                     with _opener.open(req, timeout=600) as r:
                         dest.write_bytes(r.read())
-                print('saved:', dest, dest.stat().st_size, 'bytes')
-                return
-    print('no Kernel_*.zip release asset yet; run `status` first')
+            except Exception as e:
+                print('  download failed:', type(e).__name__, e)
+                continue
+            print('saved:', dest, dest.stat().st_size, 'bytes')
+            got.add(dev)
+        if got >= set(wanted):
+            break
+    missing = set(wanted) - got
+    if missing:
+        print('no release asset yet for:', ', '.join(sorted(missing)), '- run `status` first')
 
 
 def main():
@@ -198,12 +224,17 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('publish')
     p = sub.add_parser('dispatch')
-    p.add_argument('--device', default='enuma', choices=['elish', 'enuma', 'dagu'])
+    p.add_argument('--devices', default='elish+enuma',
+                   choices=['elish+enuma', 'elish', 'enuma', 'elish+enuma+dagu'])
     p.add_argument('--ksu', default='ksu', choices=['ksu', 'rksu', 'noksu'])
     p.add_argument('--system', default='miui', choices=['miui', 'aosp', 'both'])
+    p.add_argument('--stability', default='true', choices=['true', 'false'],
+                   help="'false' builds an unpatched A/B control kernel")
     p.add_argument('--gps', default='none', choices=['none', 'dagu-minimal-node'])
     sub.add_parser('status')
-    sub.add_parser('download')
+    q = sub.add_parser('download')
+    q.add_argument('--devices', default='elish+enuma',
+                   help='comma separated codenames, e.g. elish,enuma')
     args = ap.parse_args()
     {'publish': cmd_publish, 'dispatch': cmd_dispatch,
      'status': cmd_status, 'download': cmd_download}[args.cmd](args)
