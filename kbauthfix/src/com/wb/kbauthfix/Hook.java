@@ -2,26 +2,45 @@ package com.wb.kbauthfix;
 
 import java.lang.reflect.Method;
 
+import android.util.Log;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Workaround for a ROM-side framework defect:
+ * v1.1 - work around a ROM-side framework defect that kills system_server
+ * whenever the original Xiaomi keyboard is attached.
  *
- *   KeyboardAuthHelper.initService() calls Context.bindServiceAsUser() to bind
- *   com.xiaomi.devauth/.MiDevAuthService. On this Android 17 / HyperOS 4 build
- *   ActiveServices.bindServiceLocked() throws
- *   "SecurityException: Unable to find app for caller ...". miui-services.jar
- *   only handles the boolean-false failure path ("cannot bind service"), so the
- *   exception escapes miui_input_thread and kills system_server.
+ * Crash chain (confirmed from a real 2026-11-11 13:30:36 dump):
  *
- * This module calls the ORIGINAL method (so a successful bind still performs
- * normal keyboard authentication) and only swallows that one exception type.
- * No system partition is modified. Disabling the module restores stock behaviour.
+ *   MiuiKeyboardManager.onKeyboardAttach
+ *     -> KeyboardAuthFeature.startCheckAuth            (miui_input_thread)
+ *       -> KeyboardAuthFeature.doCheckKeyboardIdentity
+ *         -> KeyboardAuthHelper.getInstance
+ *           -> KeyboardAuthHelper.initService
+ *             -> ContextImpl.bindServiceAsUser
+ *               -> ActiveServices.bindServiceLocked:4379
+ *                  SecurityException: Unable to find app for caller ...
+ *                  cmp=com.xiaomi.devauth/.MiDevAuthService
+ *
+ * v1.0 used XposedBridge.invokeOriginalMethod() and caught SecurityException.
+ * That FAILED: invokeOriginalMethod goes through reflection and wraps the
+ * thrown SecurityException in InvocationTargetException (once per hooked
+ * frame), so the exception still escaped miui_input_thread.
+ *
+ * v1.1 strategy:
+ *   1. Skip the auth chain at its entry points (startCheckAuth /
+ *      doCheckKeyboardIdentity / onReAuthCheck) so the binding is never even
+ *      attempted. This avoids both the SecurityException AND the NPE that a
+ *      half-initialised KeyboardAuthHelper could raise afterwards.
+ *   2. Keep a guard on initService: if any other path reaches it directly,
+ *      clear the SecurityException in afterHookedMethod. Because the framework
+ *      now invokes the original method itself (no reflection), the throwable
+ *      is the ORIGINAL SecurityException, not an InvocationTargetException.
+ *
+ * Nothing is written to /system. Disabling the module restores stock behaviour.
  */
 public final class Hook implements IXposedHookLoadPackage {
 
@@ -36,56 +55,90 @@ public final class Hook implements IXposedHookLoadPackage {
         if (!"android".equals(lpparam.packageName)) {
             return;
         }
-        // Primary: the call site that throws.
-        hookNamed(lpparam.classLoader, HELPER,
-                new String[]{"initService"});
-        // Belt and braces: the callers on the same chain, in case the exception
-        // is raised from a different overload on some ROM variant.
-        hookNamed(lpparam.classLoader, FEATURE,
-                new String[]{"startCheckAuth", "doCheckKeyboardIdentity", "onReAuthCheck"});
+        Log.i(TAG, "v1.1 loaded in " + lpparam.processName);
+
+        // Primary: do not start the broken authentication chain at all.
+        hookChain(lpparam.classLoader, FEATURE,
+                new String[]{"startCheckAuth", "doCheckKeyboardIdentity", "onReAuthCheck"},
+                true);
+        // Safety net: guard initService in case another path reaches it.
+        hookChain(lpparam.classLoader, HELPER,
+                new String[]{"initService"},
+                false);
     }
 
-    private static void hookNamed(ClassLoader cl, String className, String[] names) {
+    private static void hookChain(ClassLoader cl, String className, String[] names,
+                                  final boolean skipOriginal) {
         final Class<?> cls;
         try {
             cls = XposedHelpers.findClass(className, cl);
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": class unavailable " + className + " -> " + t);
+            Log.e(TAG, "class unavailable " + className + " -> " + t);
             return;
         }
+        int hooked = 0;
         for (final Method m : cls.getDeclaredMethods()) {
             boolean hit = false;
             for (String n : names) {
                 if (m.getName().equals(n)) { hit = true; break; }
             }
             if (!hit) continue;
+
             final Object fallback = defaultValue(m.getReturnType());
+            final String label = className.substring(className.lastIndexOf('.') + 1)
+                    + "." + m.getName();
             try {
-                XposedBridge.hookMethod(m, new XC_MethodReplacement() {
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
                     @Override
-                    protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!skipOriginal) return;
                         try {
-                            return XposedBridge.invokeOriginalMethod(
-                                    param.method, param.thisObject, param.args);
-                        } catch (SecurityException e) {
-                            XposedBridge.log(TAG + ": swallowed " + e
-                                    + " in " + param.method.getName());
-                            return fallback;
-                        } catch (LinkageError e) {
-                            // Some LSPosed builds may not expose invokeOriginalMethod.
-                            // Skipping the auth call entirely is still safe: it is the
-                            // very call that throws on this ROM.
-                            XposedBridge.log(TAG + ": original-method API unavailable"
-                                    + ", skipping " + param.method.getName());
-                            return fallback;
+                            // Sets returnEarly: the original method is never invoked.
+                            param.setResult(fallback);
+                            Log.i(TAG, "skipped " + label);
+                        } catch (Throwable t) {
+                            Log.e(TAG, "skip failed " + label + " -> " + t);
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Throwable t;
+                        try {
+                            t = param.getThrowable();
+                        } catch (Throwable e) {
+                            return;
+                        }
+                        if (t == null || !hasSecurityException(t)) return;
+                        try {
+                            // setResult() clears the throwable and sets returnEarly.
+                            param.setThrowable(null);
+                            param.setResult(fallback);
+                            Log.e(TAG, "swallowed " + t + " in " + label);
+                        } catch (Throwable e) {
+                            Log.e(TAG, "clear throwable failed " + label + " -> " + e);
                         }
                     }
                 });
-                XposedBridge.log(TAG + ": hooked " + className + "." + m.getName());
+                hooked++;
+                Log.i(TAG, "hooked " + label + (skipOriginal ? " [skip]" : " [guard]"));
             } catch (Throwable t) {
-                XposedBridge.log(TAG + ": hook failed " + m.getName() + " -> " + t);
+                Log.e(TAG, "hook failed " + label + " -> " + t);
             }
         }
+        Log.i(TAG, className + ": " + hooked + " method(s) hooked");
+    }
+
+    /** Walk the cause chain so both plain and reflection-wrapped failures match. */
+    private static boolean hasSecurityException(Throwable t) {
+        int depth = 0;
+        while (t != null && depth++ < 16) {
+            if (t instanceof SecurityException) return true;
+            Throwable cause = t.getCause();
+            if (cause == t) break;
+            t = cause;
+        }
+        return false;
     }
 
     private static Object defaultValue(Class<?> r) {

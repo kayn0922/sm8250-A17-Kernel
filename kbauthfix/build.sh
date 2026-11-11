@@ -16,7 +16,9 @@ rm -rf out stubcp dexout apk unsigned.apk aligned.apk KBAuthFix.apk res.flata
 mkdir -p out dexout apk/assets
 
 # Stub classes exist only at compile time (the real ones come from LSPosed).
+# android.jar is needed for android.util.Log.
 javac -source 8 -target 8 -nowarn -encoding UTF-8 -d out \
+    -classpath "$PLATFORM" \
     $(find stub src -name '*.java')
 mkdir -p stubcp
 cp -r out/de stubcp/
