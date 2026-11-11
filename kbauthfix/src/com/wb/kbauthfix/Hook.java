@@ -71,6 +71,13 @@ public final class Hook implements IXposedHookLoadPackage {
                             XposedBridge.log(TAG + ": swallowed " + e
                                     + " in " + param.method.getName());
                             return fallback;
+                        } catch (LinkageError e) {
+                            // Some LSPosed builds may not expose invokeOriginalMethod.
+                            // Skipping the auth call entirely is still safe: it is the
+                            // very call that throws on this ROM.
+                            XposedBridge.log(TAG + ": original-method API unavailable"
+                                    + ", skipping " + param.method.getName());
+                            return fallback;
                         }
                     }
                 });
