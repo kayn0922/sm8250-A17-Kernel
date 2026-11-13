@@ -1,0 +1,45 @@
+From: enuma-fix <enuma@local>
+Subject: [PATCH] soc: qcom: subsystem_restart: decouple esoc0 (X55) from its SSR restart order
+
+On enuma (X55 modem) running the elish WiFi ROM, the X55 faults roughly
+every ~13s (missing modem EFS/calibration). Stock SSR behaviour restarts
+esoc0 together with its "restart order" group, which includes the wlan
+subsystem; that pulls wlan down (deauth / breaks WLAN<->modem coexistence),
+and a stuck wlan also breaks 通信共享 (P2P GO negotiation).
+
+More importantly, fully suppressing esoc0 restart (a previous attempt) left
+the X55 unable to recover from faults, permanently killing its QMI transport
+(QMI_LOC / GNSS over QMI dies -> GPS can never acquire satellites).
+
+This change keeps esoc0 able to restart (so the modem self-recovers and
+GPS/GNSS over QMI_LOC stays alive), but removes esoc0 from its coupled
+restart order so a modem restart no longer drags the wlan subsystem with it.
+wlan then survives modem self-recovery, and 通信共享 keeps working.
+
+Signed-off-by: enuma-fix <enuma@local>
+---
+ drivers/soc/qcom/subsystem_restart.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/soc/qcom/subsystem_restart.c b/drivers/soc/qcom/subsystem_restart.c
+index 1111111..2222222 100644
+--- a/drivers/soc/qcom/subsystem_restart.c
++++ b/drivers/soc/qcom/subsystem_restart.c
+@@ -1863,5 +1863,17 @@ static int subsys_register(struct subsys_desc *desc, bool is_early_init)
+ 		subsys->restart_order = update_restart_order(subsys);
+ 
++		/*
++		 * [enuma/elish cross-port fix] Decouple esoc0 (X55 modem) from its
++		 * SSR restart order so a modem self-recovery restart does NOT pull
++		 * down the wlan subsystem (which would drop WiFi / break WLAN+modem
++		 * coexistence). esoc0 still restarts on its own to recover from
++		 * faults (needed for GPS/GNSS over QMI_LOC).
++		 */
++		if (!strcmp(subsys->desc->name, "esoc0")) {
++			subsys->restart_order = NULL;
++			pr_info("enuma: decoupled esoc0 from SSR restart order\n");
++		}
++
+ 		if (of_property_read_u32(ofnode, "qcom,ssctl-instance-id",
+ 					&desc->ssctl_instance_id))
+ 			pr_debug("Reading instance-id for %s failed\n",
