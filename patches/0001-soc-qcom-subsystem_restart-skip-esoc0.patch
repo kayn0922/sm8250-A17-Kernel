@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: WorkBuddy diagnostics
+Date: Fri, 13 Nov 2026 14:17:00 +0800
+Subject: [PATCH] soc: qcom: subsystem_restart: skip coupled restart for esoc0
+
+enuma (SM8250 + external SDX55M) running the elish (WiFi-only) ROM has no
+matching modem EFS / calibration data.  The external modem errfatals with
+
+    ssr:MP:critical_protect.c:1721:CRITICAL_DATA_CHECK_FAILED
+
+every ~12.9 seconds.  Each errfatal calls subsystem_restart_dev() with
+restart_level = RESET_SUBSYS_COUPLED ("RELATED"), which shuts down / powers
+up esoc0 and the coupled wlan subsystem, drops the cnss IMS/COEX QMI
+services, and restarts com.android.phone / TelephonyNetworkProvider.
+
+When EasyTether (communication sharing) is active the wlan is in STA + P2P
+concurrency (virp2p).  The next SSR cycle tears down the STA:
+
+    [1404.645386] ext-mdm soc:qcom,mdm0: mdm_errfatal: mdm sent errfatal interrupt
+    [1404.726895] wlan: wlan0(vdevid-0): Received Disconnect reason:3
+                        WLAN_REASON_DEAUTH_LEAVING
+    [1404.762863] wlan: Disconnect reason: 3 ... LG: 1
+
+i.e. the tablet's own WiFi is dropped the moment communication sharing is
+connected.  Pure stock (SDX55M=OFFLINE) has no such loop, so WiFi and
+sharing coexist there.
+
+Keep esoc0 out of the coupled restart path.  The modem stays powered and its
+QMI_LOC channel stays available for GNSS (the reason the GPS fix powers the
+X55 up in the first place); only the endless shutdown/powerup loop that
+resets wlan / cnss / telephony is suppressed.
+
+Runtime alternatives were verified NOT to work on this kernel:
+  * /sys/module/subsystem_restart/parameters/disable_restart_work = 1 or 2
+    -> still "Restart sequence requested for esoc0, restart_level = RELATED."
+  * /sys/bus/msm_subsys/devices/subsys10/restart_level = "disabled"
+    -> read-only, reads back RELATED.
+Hence a build-time change is required.
+
+NOTE FOR APPLYING: hunk line numbers vary between 4.19 msm branches.  If
+`git apply` rejects the hunk, locate the anchor manually with
+
+    grep -n "restart_level = %s" drivers/soc/qcom/subsystem_restart.c
+
+and insert the three-line block immediately after that pr_info() and before
+the `if (disable_restart_work == DISABLE_SSR)` check.  See README.md.
+
+---
+ drivers/soc/qcom/subsystem_restart.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/soc/qcom/subsystem_restart.c b/drivers/soc/qcom/subsystem_restart.c
+--- a/drivers/soc/qcom/subsystem_restart.c
++++ b/drivers/soc/qcom/subsystem_restart.c
+@@ -1900,6 +1900,18 @@ int subsystem_restart_dev(struct subsys_device *dev)
+ 
+ 	pr_info("Restart sequence requested for %s, restart_level = %s.\n",
+ 		name, restart_levels[dev->restart_level]);
++
++	/*
++	 * enuma + elish-ROM quirk: the external SDX55M has no matching EFS /
++	 * calibration and errfatals every ~13 s.  A coupled ("RELATED")
++	 * restart here resets the wlan subsystem and the cnss IMS/COEX QMI
++	 * services, which locally deauthenticates the WiFi STA whenever
++	 * EasyTether (virp2p + STA/P2P concurrency) is active.  Keep the
++	 * modem up for GNSS/QMI_LOC, but do not run the coupled restart.
++	 */
++	if (!strcmp(name, "esoc0")) {
++		pr_warn("subsys-restart: skipping coupled restart for %s\n", name);
++		return 0;
++	}
+ 
+ 	if (disable_restart_work == DISABLE_SSR) {
+ 		pr_warn("subsys-restart: Ignoring restart request for %s\n", name);
+-- 
+2.39.0
