@@ -52,6 +52,27 @@ want = {
     'CONFIG_RPMSG_QCOM_GLINK_SMEM': 'y',
     'CONFIG_QCOM_GLINK': 'y',
     'CONFIG_DIAG_CHAR': 'y',
+    # --- enuma (external SDX55M) modem GNSS: the v4 module powers the X55 up
+    #     via baseband=mdm + mdm_helper and runs the QTI GNSS HAL over QMI_LOC.
+    #     That path NEEDS the external-modem + MHI + CNSS2 stack compiled in.
+    #     The upstream enuma_defconfig usually has these, but elish_defconfig
+    #     (WiFi-only) does NOT - and the user's rig is enuma HW on an elish ROM,
+    #     so force them so a fresh build can never lose the modem/GNSS transport.
+    'CONFIG_ESOC': 'y',
+    'CONFIG_ESOC_DEV': 'y',
+    'CONFIG_ESOC_CLIENT': 'y',
+    'CONFIG_ESOC_MDM_4X': 'y',
+    'CONFIG_ESOC_MDM_DRV': 'y',
+    'CONFIG_MHI_BUS': 'y',
+    'CONFIG_MHI_QCOM': 'y',
+    'CONFIG_MHI_NETDEV': 'y',
+    'CONFIG_MSM_SUBSYSTEM_RESTART': 'y',
+    'CONFIG_MSM_PIL': 'y',
+    'CONFIG_MSM_PIL_SSR_GENERIC': 'y',
+    # CNSS2 is the wlan/wifi driver framework; keep it on so the modem SSR
+    # isolation patch (below) has a wlan subsystem to protect.
+    'CONFIG_CNSS2': 'y',
+    'CONFIG_CNSS2_QMI': 'y',
 }
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
@@ -94,8 +115,39 @@ PY
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# enuma + elish-ROM kernel-side fix (GPS-share stability):
+# The external SDX55M errfatals every ~13 s (no matching EFS/calibration) and
+# each errfatal runs a COUPLED ("RELATED") subsystem restart that also resets
+# the wlan subsystem + cnss QMI services, locally deauthenticating WiFi the
+# moment EasyTether (virp2p) is active, and destabilising the QMI_LOC channel
+# the QTI GNSS HAL uses.  Applying 0001 keeps esoc0 out of the coupled-restart
+# path: the modem stays powered (GNSS/QMI_LOC keep working) but the endless
+# shutdown/powerup loop that breaks WiFi/telephony is suppressed.
+# This is the kernel-side counterpart of the v4 GPS module; runtime sysfs
+# toggles (disable_restart_work, subsysN/restart_level) were verified
+# read-only / ineffective, so a build-time patch is required.
+# ---------------------------------------------------------------------------
+SSR_PATCH="$BUILDER_DIR/patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch"
+if [ -f "$SSR_PATCH" ]; then
+    if git apply --check "$SSR_PATCH" 2>/dev/null; then
+        git apply "$SSR_PATCH" && echo "[patch] applied $SSR_PATCH"
+    else
+        echo "[patch] $SSR_PATCH does not apply cleanly (hunk offsets?); trying patch -p1 --fuzz=3"
+        if patch -p1 --fuzz=3 < "$SSR_PATCH" 2>/dev/null; then
+            echo "[patch] applied $SSR_PATCH via patch -p1"
+        else
+            echo "[WARN] $SSR_PATCH NOT applied - locate the anchor manually:"
+            echo "       grep -n 'restart_level = %s' drivers/soc/qcom/subsystem_restart.c"
+            echo "       and insert the esoc0 skip block after that pr_info()."
+        fi
+    fi
+else
+    echo "[WARN] $SSR_PATCH missing - skipping SSR isolation (WiFi-share fix absent)"
+fi
+
 echo "=== verification ==="
-grep -E '^CONFIG_(AIROHA_GPS|QRTR|QMI_HELPERS|ANDROID_BINDERFS|BPF_SYSCALL)=' "$DEF"
+grep -E '^CONFIG_(AIROHA_GPS|QRTR|QMI_HELPERS|ANDROID_BINDERFS|BPF_SYSCALL|ESOC|MHI_BUS|MHI_QCOM|CNSS2|MSM_SUBSYSTEM_RESTART)=' "$DEF"
 echo "=== device DTS GPS node ==="
 grep -rn 'compatible = "bcm4775"' arch/arm64/boot/dts/vendor/qcom/${DEVICE}-sm8250.dtsi || echo '(none - normal for enuma: modem GNSS)'
 
