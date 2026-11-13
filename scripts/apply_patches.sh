@@ -146,6 +146,14 @@ else
     echo "[WARN] $SSR_PATCH missing - skipping SSR isolation (WiFi-share fix absent)"
 fi
 
+# SSR 补丁落地校验: 防止 git apply / patch 静默失败导致补丁没进内核
+# (上一次就因此漏修 —— 0001 没编进去, esoc0 仍每 ~13s 重启)
+if grep -q "skipping coupled restart" drivers/soc/qcom/subsystem_restart.c 2>/dev/null; then
+    echo "[patch] CONFIRMED: esoc0 skip block present in subsystem_restart.c (WiFi-share/SSR fix ACTIVE)"
+else
+    echo "[FATAL] esoc0 skip block NOT found in subsystem_restart.c - 0001 patch did NOT land!"
+fi
+
 echo "=== verification ==="
 grep -E '^CONFIG_(AIROHA_GPS|QRTR|QMI_HELPERS|ANDROID_BINDERFS|BPF_SYSCALL|ESOC|MHI_BUS|MHI_QCOM|CNSS2|MSM_SUBSYSTEM_RESTART)=' "$DEF"
 echo "=== device DTS GPS node ==="
