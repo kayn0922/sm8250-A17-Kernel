@@ -3,12 +3,12 @@ name: Build A17 Kernel (SukiSU)
 on:
   workflow_dispatch:
     inputs:
-      devices:
-        description: 'Devices to build in parallel (one job + one Release per codename)'
+      device:
+        description: 'Hardware codename (elish=Pad5Pro WiFi / enuma=5G / dagu=12.4)'
         required: true
-        default: 'elish+enuma'
+        default: 'enuma'
         type: choice
-        options: [elish+enuma, elish, enuma, elish+enuma+dagu]
+        options: [elish, enuma, dagu]
       ksu:
         description: 'Root solution'
         required: true
@@ -21,54 +21,21 @@ on:
         default: 'miui'
         type: choice
         options: [miui, aosp, both]
-      stability_fixes:
-        description: 'Apply keyboard panic / cgroup / pstore fixes (false = A/B control build)'
-        required: true
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
       gps_dts_fix:
         description: 'Experimental: inject a minimal bcm4775 GPS node into dagu DTS'
         required: true
         default: 'none'
         type: choice
         options: [none, dagu-minimal-node]
-      wifi_share_fix:
-        description: 'Skip esoc0 coupled SSR + apply enuma_elish_wifi_share.config (false = A/B control)'
-        required: true
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
 
 permissions:
   contents: write
 
 jobs:
-  plan:
-    name: Resolve device matrix
-    runs-on: ubuntu-latest
-    outputs:
-      devices: ${{ steps.set.outputs.devices }}
-    steps:
-      - id: set
-        run: |
-          case "${{ inputs.devices }}" in
-            elish)             echo 'devices=["elish"]'                    >> "$GITHUB_OUTPUT" ;;
-            enuma)             echo 'devices=["enuma"]'                    >> "$GITHUB_OUTPUT" ;;
-            elish+enuma+dagu)  echo 'devices=["elish","enuma","dagu"]'    >> "$GITHUB_OUTPUT" ;;
-            *)                 echo 'devices=["elish","enuma"]'            >> "$GITHUB_OUTPUT" ;;
-          esac
-          echo "building: $(cat "$GITHUB_OUTPUT")"
-
   build:
-    needs: plan
-    name: ${{ matrix.device }} / ${{ inputs.ksu }} / ${{ inputs.target_system }}
+    name: ${{ inputs.device }} / ${{ inputs.ksu }} / ${{ inputs.target_system }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        device: ${{ fromJSON(needs.plan.outputs.devices) }}
 
     steps:
       - name: Checkout this builder
@@ -102,83 +69,19 @@ jobs:
           tar -zxvf Clang-22.0.0git-20250924.tar.gz
           ls "$HOME/ZyC-clang/bin/clang" && "$HOME/ZyC-clang/bin/clang" --version | head -2
 
-      - name: Normalize builder line endings (CRLF guard)
-        run: |
-          find builder -type f \( -name '*.sh' -o -name '*.py' -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.txt' -o -name '*.config' -o -name '*.patch' \) -exec sed -i 's/\r$//' {} +
-          if grep -rl $'\r' builder/scripts builder/.github; then
-            echo 'CRLF still present in builder scripts'; exit 1
-          fi
-          echo 'builder scripts are LF'
-
       - name: Apply A17 compatibility + GPS kernel-side patches
         run: |
-          bash builder/scripts/apply_patches.sh kernel "${{ matrix.device }}" "${{ inputs.gps_dts_fix }}"
-
-      - name: Apply stability fixes (keyboard panic / cgroup / pstore)
-        if: inputs.stability_fixes == 'true'
-        run: |
-          mkdir -p artifacts
-          LOG="artifacts/STABILITY_FIXES_${{ matrix.device }}.txt"
-          {
-            echo "device=${{ matrix.device }}"
-            echo "stability_fixes=${{ inputs.stability_fixes }}"
-            echo "--- apply ---"
-            python3 builder/scripts/apply_stability_fixes.py \
-              --kernel-dir kernel --devices "${{ matrix.device }}"
-            echo "--- verify ---"
-            python3 builder/scripts/apply_stability_fixes.py \
-              --kernel-dir kernel --devices "${{ matrix.device }}" --check
-          } 2>&1 | tee "$LOG"
-          grep -q 'all stability fixes verified' "$LOG"
-
-      - name: Apply WiFi-sharing fix (esoc0 SSR skip + config fragment)
-        if: inputs.wifi_share_fix == 'true'
-        run: |
-          mkdir -p artifacts
-          LOG="artifacts/WIFI_SHARE_${{ matrix.device }}.txt"
-          {
-            echo "device=${{ matrix.device }}"
-            echo "wifi_share_fix=${{ inputs.wifi_share_fix }}"
-            echo "--- apply ---"
-            python3 builder/scripts/apply_wifi_share_fixes.py \
-              --kernel-dir kernel \
-              --device "${{ matrix.device }}" \
-              --fragment builder/configs/enuma_elish_wifi_share.config
-            echo "--- verify ---"
-            python3 builder/scripts/apply_wifi_share_fixes.py \
-              --kernel-dir kernel \
-              --device "${{ matrix.device }}" \
-              --fragment builder/configs/enuma_elish_wifi_share.config --check
-          } 2>&1 | tee "$LOG"
-          grep -q 'all wifi-share fixes verified' "$LOG"
+          bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 
       - name: Build kernel
         working-directory: kernel
         run: |
           chmod +x build.sh
           case "${{ inputs.target_system }}" in
-            miui) bash build.sh "${{ matrix.device }}" "${{ inputs.ksu }}" miui ;;
-            aosp) bash build.sh "${{ matrix.device }}" "${{ inputs.ksu }}" aosp ;;
-            both) bash build.sh "${{ matrix.device }}" "${{ inputs.ksu }}" ;;
+            miui) bash build.sh "${{ inputs.device }}" "${{ inputs.ksu }}" miui ;;
+            aosp) bash build.sh "${{ inputs.device }}" "${{ inputs.ksu }}" aosp ;;
+            both) bash build.sh "${{ inputs.device }}" "${{ inputs.ksu }}" ;;
           esac
-
-      - name: Archive and verify the FINAL .config
-        if: inputs.wifi_share_fix == 'true'
-        run: |
-          mkdir -p artifacts
-          test -f kernel/out/.config || { echo 'ERROR: kernel/out/.config missing after build'; exit 1; }
-          cp kernel/out/.config "artifacts/CONFIG_${{ matrix.device }}.txt"
-          LOG="artifacts/WIFI_SHARE_${{ matrix.device }}.txt"
-          {
-            echo "--- final out/.config (post-build, after Kconfig syncconfig) ---"
-            grep -E '^CONFIG_(PANIC_ON_SSR_NOTIF_TIMEOUT|MHI_DEBUG|MHI_UCI|MHI_SATELLITE|SETUP_SSR_NOTIF_TIMEOUTS|SSR_SYSMON_NOTIF_TIMEOUT|SSR_SUBSYS_NOTIF_TIMEOUT|ESOC|ESOC_MDM_4x)(=|_[A-Z])' kernel/out/.config || true
-            grep -E '^# CONFIG_(PANIC_ON_SSR_NOTIF_TIMEOUT|MHI_DEBUG|MHI_UCI|MHI_SATELLITE) is not set' kernel/out/.config || true
-          } | tee -a "$LOG"
-          if grep -q '^CONFIG_PANIC_ON_SSR_NOTIF_TIMEOUT=y' kernel/out/.config; then
-            echo 'ERROR: PANIC_ON_SSR_NOTIF_TIMEOUT is still enabled in the shipped .config'
-            exit 1
-          fi
-          echo 'final .config verification passed'
 
       - name: Collect flashable zips
         run: |
@@ -186,40 +89,19 @@ jobs:
           find kernel -maxdepth 1 -name 'Kernel_*.zip' -print -exec cp {} artifacts/ \;
           ls -lh artifacts/
           test -n "$(ls -A artifacts/)" || { echo 'No kernel zip produced'; exit 1; }
-          ls artifacts/Kernel_*.zip >/dev/null || { echo 'No Kernel_*.zip produced'; exit 1; }
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: kernel-${{ github.run_id }}-${{ matrix.device }}
-          name: ${{ matrix.device }} / ${{ inputs.ksu }} / ${{ inputs.target_system }} / run ${{ github.run_id }}
+          tag_name: kernel-${{ github.run_id }}
+          name: ${{ inputs.device }} / ${{ inputs.ksu }} / ${{ inputs.target_system }} / run ${{ github.run_id }}
           body: |
             Built from `ymdzq/kernel_xiaomi_sm8250_mod@android16-aptusitu`.
-            - device: `${{ matrix.device }}`
+            - device: `${{ inputs.device }}`
             - root: `${{ inputs.ksu }}` (ksu = ReSukiSU + SuSFS + KPM)
             - target: `${{ inputs.target_system }}`
-            - stability_fixes: `${{ inputs.stability_fixes }}`
             - gps_dts_fix: `${{ inputs.gps_dts_fix }}`
-            - wifi_share_fix: `${{ inputs.wifi_share_fix }}`
 
-            When `wifi_share_fix=true`: `subsystem_restart_dev()` skips the
-            coupled ("RELATED") restart for `esoc0`, which otherwise power-cycles
-            the wlan subsystem every ~13 s and deauthenticates the WiFi STA while
-            EasyTether / communication sharing is active. The supplied
-            `enuma_elish_wifi_share.config` is also applied to the FINAL
-            `out/.config` (PANIC_ON_SSR_NOTIF_TIMEOUT off, SSR timeouts, MHI
-            debug/UCI/satellite off). See `WIFI_SHARE_*.txt` and `CONFIG_*.txt`.
-            The ESOC driver family is only force-enabled for `enuma`; the WiFi-only
-            `elish` build keeps its stock (absent) ESOC settings.
-
-            `STABILITY_FIXES_*.txt` records the patch verification for this build.
-            Patches: xiaomi_keyboard notifier teardown (kernel panic after keyboard
-            reset), CONFIG_CGROUP_PIDS/DEVICE (A17 memcg), ramoops record_size
-            (pstore panic logs). They only fix kernel-side issues; the framework
-            soft-restarts caused by LSPosed/Thanox hooks still need those modules
-            disabled.
-
-            **HyperOS / OS4 users: flash `Kernel_MIUI_*.zip` only.** AOSP builds
-            blackscreen on HyperOS. The zip does NOT contain dtbo.img; keep your
-            stock dtbo. Flash only the zip matching your hardware codename.
-          files: artifacts/*
+            **HyperOS / OS4 users: flash `Kernel_MIUI_*.zip` only.** AOSP builds blackscreen on HyperOS.
+            The zip does NOT contain dtbo.img. Keep your stock dtbo. See GPS_DIAGNOSIS.md before flashing.
+          files: artifacts/*.zip
