@@ -86,7 +86,8 @@ def full(me):
     return '%s/%s' % (me, REPO_NAME)
 
 
-TEXT_SUFFIXES = {'.sh', '.py', '.yml', '.yaml', '.md', '.txt', '.json', '.cfg'}
+TEXT_SUFFIXES = {'.sh', '.py', '.yml', '.yaml', '.md', '.txt', '.json',
+                 '.cfg', '.config', '.patch', '.prop', '.java', '.xml'}
 
 
 def upload_tree(repo):
@@ -156,7 +157,7 @@ def cmd_dispatch(args):
     wid = find_workflow(repo)
     inputs = {'devices': args.devices, 'ksu': args.ksu,
               'target_system': args.system, 'stability_fixes': args.stability,
-              'gps_dts_fix': args.gps}
+              'gps_dts_fix': args.gps, 'wifi_share_fix': args.wifi_share}
     code, d = http('POST', '/repos/%s/actions/workflows/%s/dispatches' % (repo, wid),
                    {'ref': BRANCH, 'inputs': inputs})
     print('dispatch HTTP %s (204 = accepted)' % code, '' if code in (204, 201) else d)
@@ -241,6 +242,8 @@ def main():
     p.add_argument('--stability', default='true', choices=['true', 'false'],
                    help="'false' builds an unpatched A/B control kernel")
     p.add_argument('--gps', default='none', choices=['none', 'dagu-minimal-node'])
+    p.add_argument('--wifi-share', default='true', choices=['true', 'false'],
+                   help="'false' builds an A/B control without the esoc0 SSR fix")
     sub.add_parser('status')
     q = sub.add_parser('download')
     q.add_argument('--devices', default='elish+enuma',
