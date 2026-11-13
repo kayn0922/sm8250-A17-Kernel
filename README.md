@@ -41,7 +41,7 @@
 > GPS 表现也完全不同。
 
 **必须先确认你手里那台到底是哪一个**（`adb shell getprop ro.product.device` 或看 fastboot 机型）。
-本工程默认**并行编译 `elish` 与 `enuma` 两份**（`devices=elish+enuma`）；只需其中一台时把 `devices` 改成对应代号，需要 12.4" 时用 `elish+enuma+dagu`。
+本工程默认按你消息里写的 `enuma` 编译；若实际是 `elish` 或 `dagu`，改 workflow 的 `device` 输入重编即可。
 
 ---
 
@@ -115,24 +115,19 @@ OS4 是 HyperOS 4（Android 17）从 Pad 8 Pro / Pad 6 系列移植过来的第�
 
 | 输入 | 默认 | 说明 |
 |---|---|---|
-| `devices` | `elish+enuma` | **并行构建**：每个代号一个 job + 一个 Release；也可单选 `elish` / `enuma`，或 `elish+enuma+dagu` |
+| `device` | `enuma` | `elish` / `enuma` / `dagu`（按**实际硬件**选） |
 | `ksu` | `ksu` | `ksu`=ReSukiSU+SuSFS+KPM；`rksu`=RKSU；`noksu`=留给 Magisk/APatch |
 | `target_system` | `miui` | **HyperOS4 必须 miui**；`aosp` 仅类原生 ROM；`both` 两个都编 |
-| `stability_fixes` | `true` | 应用稳定性补丁；设 `false` 编一份未打补丁的 A/B 对照内核 |
 | `gps_dts_fix` | `none` | `dagu-minimal-node` = 给 dagu 的 DTS 注入最小 `bcm4775` 节点（实验性，见下） |
-| `wifi_share_fix` | `true` | 跳过 `esoc0` 的耦合 SSR 重启 + 应用 `enuma_elish_wifi_share.config`；设 `false` 编对照内核（见第 12 节） |
 
-命令行（本机，REST API；默认直连，需要代理时设 `GH_PROXY`）：
+命令行（本机，走 10808 代理 + REST API）：
 
 ```bash
-GH_TOKEN=<token> python scripts/github_api.py publish
-GH_TOKEN=<token> python scripts/github_api.py dispatch --devices elish+enuma --ksu ksu --system miui --stability true --wifi-share true
+GH_TOKEN=<token> python scripts/github_api.py publish     # 建仓并上传工程
+GH_TOKEN=<token> python scripts/github_api.py dispatch --device enuma --ksu ksu --system miui
 GH_TOKEN=<token> python scripts/github_api.py status
-GH_TOKEN=<token> python scripts/github_api.py download --devices elish,enuma
+GH_TOKEN=<token> python scripts/github_api.py download    # 取回 Kernel_MIUI_*.zip
 ```
-
-> **刷错机型会黑屏 / 触控异常**：`elish` = Pad 5 Pro WiFi，`enuma` = 5G，`dagu` = 12.4"。
-> Release tag 形如 `kernel-<run_id>-<device>`，每个设备各自的 `Kernel_MIUI_<device>_*.zip`。
 
 workflow 直接浅克隆 ymdzq 内核源码 + ZyC-Clang 22，在 GitHub Actions 上编译，
 产物以 Release 里的 `Kernel_MIUI_<device>_SukiSU_*_anykernel3_*.zip` 发布。约 1–3 小时。
@@ -153,14 +148,9 @@ workflow 直接浅克隆 ymdzq 内核源码 + ZyC-Clang 22，在 GitHub Actions 
 ## 9. 文件清单
 
 ```
-.github/workflows/build-a17-kernel.yml   云编译（devices 矩阵并行 / ksu / system / stability_fixes / gps_dts_fix）
+.github/workflows/build-a17-kernel.yml   云编译（参数化 device/ksu/system/gps_dts_fix）
 scripts/apply_patches.sh                 A17 config 校验 + GPS 内核侧强制项 + 可选 DTS 补丁
-scripts/apply_stability_fixes.py        键盘 panic / cgroup / pstore 稳定性补丁（幂等，--check 校验）
-scripts/apply_wifi_share_fixes.py       esoc0 SSR 跳过 + config fragment 注入（幂等，--check 校验）
-scripts/backport_patches.sh              vendor 化的 4.19 backport（build.sh 依赖）
 scripts/github_api.py                   publish / dispatch / status / download
-configs/enuma_elish_wifi_share.config   WiFi 共享场景 .config fragment（用户提供，原文）
-patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch   SSR 源码补丁（用户提供，原文）
 GPS_DIAGNOSIS.md                        GPS 分层诊断命令与修复分流
 README.md                              本文件
 ```
@@ -174,76 +164,3 @@ README.md                              本文件
 - https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod ・ https://github.com/HuberyBrook/kernel_xiaomi_sm8250_mod
 - https://github.com/ReSukiSU/ReSukiSU ・ https://sukisu.org/
 - XDA: `[ROM][UNOFFICIAL][A17][ELISH] LineageOS 24 for Xiaomi Pad 5 Pro WiFi`
-
----
-
-## 11. 稳定性补丁（`stability_fixes=true`）
-
-`scripts/apply_stability_fixes.py` 在 `apply_patches.sh` 之后运行，幂等、按结构匹配，
-`--check` 只校验不写入；校验记录随 Release 发布为 `STABILITY_FIXES_<device>.txt`。
-三处修复均已逐行对照 `ymdzq/kernel_xiaomi_sm8250_mod@android16-aptusitu` 源码确认：
-
-| 文件 | 问题 | 修复 |
-|---|---|---|
-| `drivers/input/misc/xiaomi_keyboard/*` | `xiaomi_keyboard_remove()` 释放 `mdata`、销毁 `event_wq`，却**没有** `power_supply_unreg_notifier()`；回调里的 `if (mdata != NULL)` 恒真（`container_of` 不返回 NULL）。键盘复位后任意电源事件 → `__queue_work` 空指针 → `Kernel panic - Fatal exception` | 注销两个 notifier、先停用再销毁 workqueue、回调判空并加 `notifier_active` 状态位 |
-| `arch/arm64/configs/<device>_defconfig` | 缺 `CONFIG_CGROUP_PIDS` / `CONFIG_CGROUP_DEVICE` → A17 `init: failed write pid to memcg` | 在 `CONFIG_CGROUP_BPF=y` 后强制开启 |
-| `fs/pstore/ram.c` | `ramoops_memreserve()` 把 4M 全给 console+pmsg，`record_size=0`，pstore 永不落盘（无法留存 panic 证据） | 分配 `record_size` / `ftrace_size`，console 与 pmsg 各 1M |
-
-**边界**：这些补丁只覆盖内核侧。诊断中已经确认的框架层软重启
-（`KeyboardAuthHelper` → `com.xiaomi.devauth` → LSPosed/Thanox 篡改
-`ActiveServices.bindServiceLocked` → `system_server` 崩溃）与 vendor/system 侧
-VINTF HAL 缺失、SELinux 策略错配、`/vendor/odm/etc/setting.xml` EACCES、
-qspmhal `renameat2` 崩溃循环等，**都不是重编内核能修的**。软重启仍需禁用
-hook 系统服务的模块；完整修复应回退与本机 SKU 匹配的官方完整包。
-
-刷入前务必备份 `boot.img` / `dtbo.img` / `persist` / `/data`，并确认设备真实解锁状态。
-
----
-
-## 12. WiFi 共享掉线修复（`wifi_share_fix=true`，2026-11-13）
-
-**现象**：enuma 硬件（SM8250 + 外置 SDX55M）刷 elish（WiFi-only）ROM 后，外置基带
-因没有配套 EFS/校准数据，每约 13 秒 errfatal 一次
-（`CRITICAL_DATA_CHECK_FAILED`）。每次 errfatal 都以 `RESET_SUBSYS_COUPLED`
-（"RELATED"）调用 `subsystem_restart_dev()`，连带 power-cycle `esoc0` 与耦合的
-wlan 子系统，冲掉 cnss IMS/COEX QMI 服务；在「通信共享 / EasyTether」的
-STA + P2P 并发状态下，平板自己的 WiFi STA 会立刻被本地去认证
-（`WLAN_REASON_DEAUTH_LEAVING`）。纯官方状态 `SDX55M=OFFLINE` 无此循环。
-
-**运行态开关无效**（已验证）：`/sys/module/subsystem_restart/parameters/disable_restart_work`
-写 1/2 仍打印 `Restart sequence requested for esoc0, restart_level = RELATED`；
-`/sys/bus/msm_subsys/devices/subsys10/restart_level` 是只读的。所以必须编译期改。
-
-| 输入 | 作用 |
-|---|---|
-| `patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch` | 在 `subsystem_restart_dev()` 的 `pr_info("Restart sequence requested ...")` 之后、`disable_restart_work` 检查之前，对 `name == "esoc0"` 直接 `return 0`。modem 保持上电、QMI_LOC 可供 GNSS，只掐掉反复重启 wlan/cnss/telephony 的循环 |
-| `configs/enuma_elish_wifi_share.config` | 关 `CONFIG_PANIC_ON_SSR_NOTIF_TIMEOUT`、SSR 超时保持 20000ms、关 MHI 调试/噪声项，其余 ESOC/MHI/CNSS2/QRTR 保持开启 |
-
-**实现上的四个必要修正**：
-
-1. **补丁按结构匹配，不用 `git apply`**：原 patch 的 hunk 是 `@@ -1900,6 +1900,18 @@`，
-   而 `android16-aptusitu` 分支的锚点实际在 `subsystem_restart.c:1239`，
-   直接 `git apply` 必然失败。`apply_wifi_share_fixes.py` 用
-   `pr_info(...)` + `if (disable_restart_work == DISABLE_SSR)` 双锚点定位插入。
-2. **config fragment 注入 `build.sh` 的 `SET_CONFIG()` 尾部**：`SET_CONFIG()` 在
-   `make <device>_defconfig` 之后、编译之前用 `scripts/config --file out/.config`
-   改**最终** `.config`。只改 defconfig 不够 —— 上一版构建就出现过
-   defconfig 已加 `CONFIG_CGROUP_PIDS/DEVICE`，但刷入后 `/proc/config.gz` 仍是
-   `not set`。脚本会解析 fragment 生成 `scripts/config` 参数，不是硬编码。
-3. **修正符号大小写**：fragment 写 `CONFIG_ESOC_MDM_4X`，上游 Kconfig 与
-   `enuma_defconfig` 实际是 `CONFIG_ESOC_MDM_4x`（小写 x）。仓库保留输入原文，
-   生成命令时映射为 `ESOC_MDM_4x` 并在 CI 日志打印提示。
-4. **按设备区分**：`ESOC*` 驱动族只对 `enuma` 强制开启；`elish` 是 WiFi-only、
-   DTS 里没有 `esoc0` 节点，强开只会编入无用驱动，因此 elish 只应用
-   `PANIC_ON_SSR_NOTIF_TIMEOUT` / MHI 降噪等通用项。源码补丁对两者都打
-   （elish 上不会触发 `name == "esoc0"`，无副作用）。
-
-**CI 校验产物**（随 Release 发布）：
-`WIFI_SHARE_<device>.txt`（apply/check 全过程 + 编译后 `out/.config` 实际值）、
-`CONFIG_<device>.txt`（编译完成后的完整 `.config`）。流水线会断言
-`CONFIG_PANIC_ON_SSR_NOTIF_TIMEOUT=y` **没有**出现在最终 `.config` 里，
-否则 job 直接失败，避免再次产出「补丁打了但没生效」的包。
-
-**边界**：这只处理内核侧 SSR 循环。framework 层的键盘鉴权崩溃
-（需 LSPosed 的 KBAuthFix 模块）、VINTF 缺 HAL、`com.android.phone`
-缺 `ExtTelephonyManager` 的 crash-loop 都还在，与本次改动无关。
