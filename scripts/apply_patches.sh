@@ -116,19 +116,21 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
-# enuma + elish-ROM kernel-side fix (GPS-share stability):
-# The external SDX55M errfatals every ~13 s (no matching EFS/calibration) and
-# each errfatal runs a COUPLED ("RELATED") subsystem restart that also resets
-# the wlan subsystem + cnss QMI services, locally deauthenticating WiFi the
-# moment EasyTether (virp2p) is active, and destabilising the QMI_LOC channel
-# the QTI GNSS HAL uses.  Applying 0001 keeps esoc0 out of the coupled-restart
-# path: the modem stays powered (GNSS/QMI_LOC keep working) but the endless
-# shutdown/powerup loop that breaks WiFi/telephony is suppressed.
-# This is the kernel-side counterpart of the v4 GPS module; runtime sysfs
-# toggles (disable_restart_work, subsysN/restart_level) were verified
-# read-only / ineffective, so a build-time patch is required.
+# enuma + elish-ROM kernel-side fix (GPS recovery WITHOUT breaking WiFi):
+# The external SDX55M errfatals every ~13 s (no matching EFS/calibration).
+# Stock SSR restarts esoc0 together with its "restart order" group, which
+# includes the wlan subsystem -> wlan is pulled down (deauth / breaks WLAN<->modem
+# coexistence) and 通信共享 (P2P GO) negotiation fails.  A PREVIOUS attempt
+# suppressed esoc0 restart entirely, but that left the X55 unable to recover
+# from faults -> its QMI transport died permanently -> GPS could never acquire
+# satellites.  The correct fix (0001) DECOUPLES esoc0 from its restart order:
+# esoc0 still restarts on its own (modem self-recovers, QMI_LOC/GNSS stay
+# alive), but a modem restart no longer drags the wlan subsystem with it, so
+# WiFi + 通信共享 keep working.  Runtime sysfs toggles (disable_restart_work,
+# subsysN/restart_level) were verified read-only / ineffective, so a build-time
+# patch is required.
 # ---------------------------------------------------------------------------
-SSR_PATCH="$BUILDER_DIR/patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch"
+SSR_PATCH="$BUILDER_DIR/patches/0001-soc-qcom-subsystem_restart-decouple-esoc0.patch"
 if [ -f "$SSR_PATCH" ]; then
     if git apply --check "$SSR_PATCH" 2>/dev/null; then
         git apply "$SSR_PATCH" && echo "[patch] applied $SSR_PATCH"
@@ -148,10 +150,10 @@ fi
 
 # SSR 补丁落地校验: 防止 git apply / patch 静默失败导致补丁没进内核
 # (上一次就因此漏修 —— 0001 没编进去, esoc0 仍每 ~13s 重启)
-if grep -q "skipping coupled restart" drivers/soc/qcom/subsystem_restart.c 2>/dev/null; then
-    echo "[patch] CONFIRMED: esoc0 skip block present in subsystem_restart.c (WiFi-share/SSR fix ACTIVE)"
+if grep -q "decoupled esoc0 from SSR restart order" drivers/soc/qcom/subsystem_restart.c 2>/dev/null; then
+    echo "[patch] CONFIRMED: esoc0 decouple block present in subsystem_restart.c (GPS-recover + WiFi-stable fix ACTIVE)"
 else
-    echo "[FATAL] esoc0 skip block NOT found in subsystem_restart.c - 0001 patch did NOT land!"
+    echo "[FATAL] esoc0 decouple block NOT found in subsystem_restart.c - 0001 patch did NOT land!"
 fi
 
 echo "=== verification ==="
