@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: WorkBuddy diagnostics
-Date: Fri, 13 Nov 2026 14:17:00 +0800
+Date: Fri, 13 Nov 2026 16:30:00 +0800
 Subject: [PATCH] soc: qcom: subsystem_restart: skip coupled restart for esoc0
 
 enuma (SM8250 + external SDX55M) running the elish (WiFi-only) ROM has no
@@ -37,40 +37,31 @@ Runtime alternatives were verified NOT to work on this kernel:
     -> read-only, reads back RELATED.
 Hence a build-time change is required.
 
-NOTE FOR APPLYING: hunk line numbers vary between 4.19 msm branches.  If
-`git apply` rejects the hunk, locate the anchor manually with
-
-    grep -n "restart_level = %s" drivers/soc/qcom/subsystem_restart.c
-
-and insert the three-line block immediately after that pr_info() and before
-the `if (disable_restart_work == DISABLE_SSR)` check.  See README.md.
-
+The hunk anchor is the "Restart sequence requested for %s, restart_level"
+pr_info inside subsystem_restart_dev(); the esoc0 skip block is inserted
+immediately before the existing "disable_restart_work == DISABLE_SSR" check.
 ---
- drivers/soc/qcom/subsystem_restart.c | 12 ++++++++++++
- 1 file changed, 12 insertions(+)
+ drivers/soc/qcom/subsystem_restart.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
 
 diff --git a/drivers/soc/qcom/subsystem_restart.c b/drivers/soc/qcom/subsystem_restart.c
 --- a/drivers/soc/qcom/subsystem_restart.c
 +++ b/drivers/soc/qcom/subsystem_restart.c
-@@ -1900,6 +1900,18 @@ int subsystem_restart_dev(struct subsys_device *dev)
- 
+@@ -1239,4 +1239,17 @@ subsystem_restart_dev(struct subsys_device *dev)
  	pr_info("Restart sequence requested for %s, restart_level = %s.\n",
  		name, restart_levels[dev->restart_level]);
-+
+ 
 +	/*
 +	 * enuma + elish-ROM quirk: the external SDX55M has no matching EFS /
 +	 * calibration and errfatals every ~13 s.  A coupled ("RELATED")
 +	 * restart here resets the wlan subsystem and the cnss IMS/COEX QMI
 +	 * services, which locally deauthenticates the WiFi STA whenever
-+	 * EasyTether (virp2p + STA/P2P concurrency) is active.  Keep the
-+	 * modem up for GNSS/QMI_LOC, but do not run the coupled restart.
++	 * EasyTether (virp2p) is active.  Keep the modem up for GNSS/QMI_LOC,
++	 * but do not run the coupled restart.
 +	 */
 +	if (!strcmp(name, "esoc0")) {
 +		pr_warn("subsys-restart: skipping coupled restart for %s\n", name);
 +		return 0;
 +	}
- 
++
  	if (disable_restart_work == DISABLE_SSR) {
- 		pr_warn("subsys-restart: Ignoring restart request for %s\n", name);
--- 
-2.39.0
