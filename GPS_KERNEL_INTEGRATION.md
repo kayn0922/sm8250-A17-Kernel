@@ -31,7 +31,7 @@ ESOC/QRTR/QMI/MHI/CNSS2 栈，并在 modem 反复 SSR 时不把整块 wlan/cnss/
 | `darkmode_heal.sh`（uiMode 往返） | 用户态 | ❌ 必须留模块 |
 | `fix_flashlight`：overlay `elish.xml` 把 `support_android_flashlight=true→false` | 用户态文件 overlay | ❌ 必须留模块 |
 | **ESOC/QRTR/QMI/MHI/CNSS2 栈编译进内核** | 内核 | ✅ 本次已加强制 |
-| **modem 反复 SSR 不再连带重启 wlan/cnss/telephony** | 内核 | ✅ `0001` 补丁已接入 |
+| **esoc0 解耦：modem 仍自愈重启救 GPS，但不再连带重启 wlan/cnss/telephony** | 内核 | ✅ `0001` 补丁已接入 |
 
 > 关键点：就算把上面两行内核项全做了，**modem 真正上电仍然靠 `ro.baseband=mdm`
 > + `mdm_helper` 这个用户态触发链**。单靠内核无法把 X55 拉起来，所以模块不能删。
@@ -47,14 +47,16 @@ ESOC/QRTR/QMI/MHI/CNSS2 栈，并在 modem 反复 SSR 时不把整块 wlan/cnss/
    - 这一步专治「enuma 硬件 + elish ROM」这台机器：elish_defconfig 是 WiFi 版，
      默认不含这些，换内核后 modem/GNSS 传输栈可能缺失；强制后无论选哪个 device 都齐全。
    - 新增一步：构建时 `git apply`（失败回退 `patch -p1 --fuzz=3`）应用
-     `patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch`。
+     `patches/0001-soc-qcom-subsystem_restart-decouple-esoc0.patch`。
    - 验证行新增打印 ESOC/MHI/CNSS2，构建日志一眼可查。
 
-2. **`patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch`**
-   - 在 `subsystem_restart_dev()` 里对 `name == "esoc0"` 直接 `return 0`，跳过
-     耦合（RELATED）重启。modem 保持上电、QMI_LOC 仍可供 GNSS；只是不再每 13 秒
-     把 wlan/cnss/telephony 一起重启。
-   - 这是「连共享断 WiFi」与「modem SSR 抖动影响 QMI_LOC」两件事的共同内核根因修复。
+2. **`patches/0001-soc-qcom-subsystem_restart-decouple-esoc0.patch`**
+   - 在 `subsys_register()` 里把 `esoc0`（X55 modem）的 `restart_order` 置空，使其从
+     耦合（RELATED）重启组里摘出来。**esoc0 仍能单独重启** —— X55 fault 后照常自愈、
+     QMI_LOC/GNSS 通道恢复（GPS 能收星）；但重启不再牵连 wlan/cnss，WiFi 与 通信共享 不受影响。
+   - 这是「连共享断 WiFi / P2P GO 协商失败」与「modem SSR 抖动拖死 QMI 导致 GPS 收不到星」
+     两件事的共同内核根因修复。**注意**：早先一版补丁是 `return 0` 直接禁止 esoc0 重启，
+     结果 X55 一旦 fault 就永久卡死、QMI 全死、GPS 收不到星 —— 已废弃，本版改为解耦而非禁重启。
 
 3. **`enuma_gps_kernel.config`**：独立 .config 片段（不走 builder 时 `merge_config` 用）。
 
@@ -84,7 +86,7 @@ GH_TOKEN=<token> python scripts/github_api.py download   # 取回 Kernel_MIUI_en
 ARCH=arm64 scripts/kconfig/merge_config.sh \
     arch/arm64/configs/enuma_defconfig enuma_gps_kernel.config
 # 再打 SSR 补丁（若 apply_patches.sh 没跑）
-git apply patches/0001-soc-qcom-subsystem_restart-skip-esoc0.patch   # 失败按补丁头注释手动锚定
+git apply patches/0001-soc-qcom-subsystem_restart-decouple-esoc0.patch   # 失败按补丁头注释手动锚定
 # 工具链：ZyC-Clang 22（builder 同款），ARCH=arm64
 make -j$(nproc) Image.gz dtb
 ```
@@ -103,10 +105,11 @@ make -j$(nproc) Image.gz dtb
    - `getprop vendor.peripheral.SDX55M.state` 应为 **ONLINE**（模块生效时）；
    - `ps -A | grep gnss@2.1-service-qti` 应有进程；
    - `dumpsys location` 见 `GNSS Hardware Model Name: qcom` 且能收星。
-5. **WiFi/共享验证**（SSR 补丁效果）：`dmesg` 不再有成串
-   `Shutting down esoc0 / Powering up esoc0`；连上通信共享后
-   `settings get secure celluar_shared_state` 为 1 且 `wlan0` 仍保有 IP；
-   `SDX55M=ONLINE`、qti HAL 存活。
+5. **WiFi/共享验证**（解耦补丁效果）：`dmesg` 仍可见 `Shutting down esoc0 / Powering up esoc0`
+   （esoc0 单独重启 = 正常自愈，说明 GPS 通道能恢复），但**不再有成串把 wlan 一起重启**；
+   连上通信共享后 `settings get secure celluar_shared_state` 为 1 且 `wlan0` 仍保有 IP、
+   P2P GO 能正常协商（不再是"连接失败"）；`SDX55M=ONLINE`、qti HAL 存活、`dumpsys location`
+   的 `sv status messages processed` > 0（真正收星）。
 6. **回退**：黑屏/起不来 → 刷回备份的 `boot.img` 即可，内核改动随 boot 一起回滚；
    模块侧回退见 v4 的 `disable` / 删 `fix_*` marker 机制。
 
@@ -120,7 +123,8 @@ make -j$(nproc) Image.gz dtb
 - **光改 .config 修不了 SSR**：运行时 sysfs（`disable_restart_work`、`subsysN/restart_level`）
   已实测只读/无效，必须打 `0001` 补丁重编。
 - **根治需补 enuma 原厂 X55 modem EFS**，那要动分区，超出「不碰分区、可回滚」约束；
-  本方案只是把影响隔离，modem 每 13 秒仍会 errfatal（只是不再连带重启别的子系统）。
+  本方案只是解耦：esoc0 仍会每隔 ~13 秒因 errfatal 单独重启（自愈），但 wlan 不再被牵连、
+  GPS 通道随重启恢复。
 - `0001` 补丁的 hunk 行号在不同 4.19 msm 分支会有偏移；`git apply` 若拒，按补丁头
   注释用 `grep -n "restart_level = %s" drivers/soc/qcom/subsystem_restart.c` 手动锚定
   插 3 行，或已由 `patch -p1 --fuzz=3` 容错兜底。
