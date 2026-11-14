@@ -73,6 +73,9 @@ want = {
     # isolation patch (below) has a wlan subsystem to protect.
     'CONFIG_CNSS2': 'y',
     'CONFIG_CNSS2_QMI': 'y',
+    # Unplug + deep-sleep reboot guard: self-contained kernel module
+    # (drivers/misc/unplug_suspend_guard.c) wired in below.
+    'CONFIG_UNPLUG_SUSPEND_GUARD': 'y',
 }
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
@@ -227,5 +230,37 @@ if 'SUSFS_ENABLE=1' in s:
 
 open(p, 'w', encoding='utf-8').write(s)
 PY
+
+# ---------------------------------------------------------------------------
+# unplug_suspend_guard: kernel-space fix for the unplug+deep-sleep reboot.
+# Copies a self-contained module into drivers/misc, wires it into the build
+# (Makefile + Kconfig) and relies on the defconfig force above
+# (CONFIG_UNPLUG_SUSPEND_GUARD=y) to compile it in. It does NOT modify any
+# charger / PD / fuel-gauge driver, so charging and other features are untouched.
+# ---------------------------------------------------------------------------
+USG_C="$BUILDER_DIR/patches/unplug_suspend_guard.c"
+if [ -f "$USG_C" ]; then
+    cp "$USG_C" "$KDIR_ABS/drivers/misc/unplug_suspend_guard.c"
+    echo "[patch] copied unplug_suspend_guard.c -> drivers/misc/"
+
+    if ! grep -q "unplug_suspend_guard" "$KDIR_ABS/drivers/misc/Makefile"; then
+        printf 'obj-$(CONFIG_UNPLUG_SUSPEND_GUARD)\t+= unplug_suspend_guard.o\n' >> "$KDIR_ABS/drivers/misc/Makefile"
+        echo "[patch] drivers/misc/Makefile: added unplug_suspend_guard.o"
+    fi
+
+    if ! grep -q "UNPLUG_SUSPEND_GUARD" "$KDIR_ABS/drivers/misc/Kconfig"; then
+        printf '\nconfig UNPLUG_SUSPEND_GUARD\n\ttristate "Unplug + deep-sleep reboot guard (sm8250)"\n\tdepends on PM_SLEEP && POWER_SUPPLY\n\tdefault y\n\thelp\n\t  Holds a suspend wakelock while USB is unplugged to prevent the\n\t  unplug+deep-sleep reboot seen on Xiaomi Pad 5 Pro (elish/enuma).\n\t  Self-contained; does not modify charger/PD/fuel-gauge drivers.\n\t  Toggle at runtime via the hold_while_unplugged module param.\n' >> "$KDIR_ABS/drivers/misc/Kconfig"
+        echo "[patch] drivers/misc/Kconfig: added UNPLUG_SUSPEND_GUARD"
+    fi
+
+    # sanity: confirm the config actually landed in the defconfig
+    if grep -q '^CONFIG_UNPLUG_SUSPEND_GUARD=y$' "$DEF"; then
+        echo "[patch] CONFIRMED: CONFIG_UNPLUG_SUSPEND_GUARD=y in $DEF"
+    else
+        echo "[WARN] CONFIG_UNPLUG_SUSPEND_GUARD not found in $DEF - forced-enable may have missed"
+    fi
+else
+    echo "[WARN] $USG_C missing - skipping unplug_suspend_guard (reboot guard absent)"
+fi
 
 echo "[patch] done"

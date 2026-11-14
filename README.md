@@ -145,11 +145,34 @@ workflow 直接浅克隆 ymdzq 内核源码 + ZyC-Clang 22，在 GitHub Actions 
 
 ---
 
+## 8.1 拔线 + 熄屏重启修复（unplug_suspend_guard）
+
+症状：拔掉充电线并且屏幕熄屏进入深睡时，设备会在数十秒内静默重启。
+根因在内核充电 / 电量计驱动的 suspend 路径（拔线后 `dual_fuel_gauge` 仍报
+约 1661mA 充电电流、`smblib_suspend_on_debug_battery` 返回 -EINVAL，随后
+suspend/resume 竞态导致 SoC 复位）。
+
+修复：内核模块 `patches/unplug_suspend_guard.c`，在 USB 拔线期间持有内核
+`suspend wakelock`（wakeup_source），阻止设备深睡，直到重新插线才释放。
+效果等同于此前验证有效的用户态 wakelock 守护进程，但运行在内核态、无用户态
+依赖。该模块**不修改任何充电 / PD / 电量计驱动**，不影响充电与其他功能。
+
+- 由 `scripts/apply_patches.sh` 自动拷贝到 `drivers/misc/`、加入 Makefile/Kconfig，
+  并在 defconfig 中强制 `CONFIG_UNPLUG_SUSPEND_GUARD=y`（内置编译进内核）。
+- 运行时可用模块参数临时关闭：
+  `echo 0 > /sys/module/unplug_suspend_guard/parameters/hold_while_unplugged`。
+- 刷入新内核并确认不再重启后，可卸载之前的用户态守护进程
+  （设备上 `/data/adb/usbplug_wl/uninstall.sh`）。
+- 编译参数 `device` 必须和当前在跑的内核一致（本机为 enuma 硬件跑 elish ROM，选 `enuma`）。
+
+---
+
 ## 9. 文件清单
 
 ```
 .github/workflows/build-a17-kernel.yml   云编译（参数化 device/ksu/system/gps_dts_fix）
-scripts/apply_patches.sh                 A17 config 校验 + GPS 内核侧强制项 + 可选 DTS 补丁
+scripts/apply_patches.sh                 A17 config 校验 + GPS 内核侧强制项 + unplug_suspend_guard 接入
+patches/unplug_suspend_guard.c           拔线期间持 suspend wakelock，修复拔线+熄屏重启（独立内核模块）
 scripts/github_api.py                   publish / dispatch / status / download
 GPS_DIAGNOSIS.md                        GPS 分层诊断命令与修复分流
 README.md                              本文件
