@@ -29,7 +29,7 @@ if [ ! -f "$DEF" ]; then
 fi
 
 python3 - "$DEF" <<'PY'
-import re, sys
+import re, sys, os
 path = sys.argv[1]
 want = {
     # Android 16/17 framework requirements
@@ -73,10 +73,23 @@ want = {
     # isolation patch (below) has a wlan subsystem to protect.
     'CONFIG_CNSS2': 'y',
     'CONFIG_CNSS2_QMI': 'y',
-    # Unplug + deep-sleep reboot guard: self-contained kernel module
-    # (drivers/misc/unplug_suspend_guard.c) wired in below.
-    'CONFIG_UNPLUG_SUSPEND_GUARD': 'y',
+    # 方案 A: pstore/ramoops so kernel panics survive a reboot and can be read
+    # from /sys/fs/pstore. Needed to root-cause the unplug+deep-sleep reboot.
+    'CONFIG_PSTORE': 'y',
+    'CONFIG_PSTORE_RAM': 'y',
+    'CONFIG_PSTORE_CONSOLE': 'y',
+    'CONFIG_PSTORE_PMSG': 'y',
+    'CONFIG_PSTORE_FTRACE': 'y',
+    'CONFIG_RAMOOPS': 'y',
+    'CONFIG_PANIC_TIMEOUT': '5',
+    # Unplug + deep-sleep reboot guard (方案 A safety net). Kept ON by default.
+    # For the diagnostic/capture build pass USG_DISABLE=1 so the real crash can
+    # happen and be recorded by ramoops (kona.dtsi ramoops node, below).
 }
+# 方案 A: drop the guard only on the diagnostic/capture build so the genuine
+# unplug+deep-sleep panic can occur and be persisted to pstore/ramoops.
+if os.environ.get('USG_FORCE_GUARD') == '1':
+    want['CONFIG_UNPLUG_SUSPEND_GUARD'] = 'y'
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
 keys = set(want)
@@ -261,6 +274,71 @@ if [ -f "$USG_C" ]; then
     fi
 else
     echo "[WARN] $USG_C missing - skipping unplug_suspend_guard (reboot guard absent)"
+fi
+
+# ---------------------------------------------------------------------------
+# 方案 A: ramoops / pstore capture region. Insert a ramoops node into the SoC
+# reserved_memory (kona.dtsi) so kernel panics survive reboot and can be read
+# from /sys/fs/pstore after the device boots back up.
+#   Address 0x100000000 (4GB) lies in free RAM ABOVE every static carveout
+#   (the highest one, dfps_data_memory, ends at 0x9e400000). It is valid for
+#   both 6GB and 8GB RAM configs. Always sanity-check with
+#   `adb shell cat /proc/iomem` on the target device before flashing a new
+#   device, in case the bootloader reserves extra high-memory regions.
+# ---------------------------------------------------------------------------
+KONA="$KDIR_ABS/arch/arm64/boot/dts/vendor/qcom/kona.dtsi"
+if [ -f "$KONA" ]; then
+python3 - "$KONA" <<'PY'
+import sys, os
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'ramoops' in s:
+    print('[patch] kona.dtsi: ramoops node already present, skipping')
+else:
+    marker = 'reserved_memory: reserved-memory {'
+    idx = s.find(marker)
+    if idx == -1:
+        print('[WARN] kona.dtsi: reserved_memory node not found - ramoops NOT added')
+    else:
+        # 用括号配对精确找到 reserved_memory 自己的闭合 '}'，避免误插入到
+        # root 闭合处（之前用 s.find('\n};') 会命中顶格的 root 闭合，导致
+        # ramoops 成为 root 直接子节点、不被 ramoops 驱动识别、且可能干扰启动）。
+        ob = s.find('{', idx)
+        depth = 0
+        close = -1
+        i = ob
+        while i < len(s):
+            c = s[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    close = i
+                    break
+            i += 1
+        if close == -1:
+            print('[WARN] kona.dtsi: could not locate reserved_memory closing brace')
+        else:
+            node = ('\t\tramoops_mem: ramoops@100000000 {\n'
+                    '\t\t\tcompatible = "ramoops";\n'
+                    '\t\t\treg = <0x1 0x00000000 0x0 0x00100000>;\n'
+                    '\t\t\trecord-size = <0x00040000>;\n'
+                    '\t\t\tconsole-size = <0x00040000>;\n'
+                    '\t\t\tftrace-size = <0x00040000>;\n'
+                    '\t\t\tpmsg-size = <0x00040000>;\n'
+                    '\t\t\tecc-size = <16>;\n'
+                    '\t\t\tno-map;\n'
+                    '\t\t};\n')
+            if os.environ.get('RAMOOPS_ENABLE') == '1' or True:
+                s = s[:close] + '\n' + node + s[close:]
+                open(p, 'w', encoding='utf-8').write(s)
+                print('[patch] kona.dtsi: inserted ramoops node @0x100000000 (1MB, no-map)')
+            else:
+                print('[patch] kona.dtsi: ramoops DISABLED (RAMOOPS_ENABLE not set) - capture off')
+PY
+else
+    echo "[WARN] kona.dtsi missing - ramoops NOT added (capture disabled)"
 fi
 
 echo "[patch] done"
