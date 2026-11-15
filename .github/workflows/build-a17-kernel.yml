@@ -28,11 +28,11 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF (AIROHA_GPS/GENI kept)'
+        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF; spifix = clean base + spi_geni_suspend -EBUSY fix (no wakelock, native deep sleep)'
         required: true
         default: 'stable'
         type: choice
-        options: [stable, clean, guard, capture, bisect]
+        options: [stable, clean, guard, capture, bisect, spifix]
 
 permissions:
   contents: write
@@ -88,10 +88,15 @@ jobs:
           #   no reboot  -> the ESOC stack was the regression
           #   still reboot-> run /sys/power/pm_test with netconsole to find
           #                  which suspend stage resets the SoC
+          # spifix = verified root fix: pm_test on a clean (no guard, no
+          # 0001/0002/0003) kernel showed spi_geni_suspend() returning -EBUSY
+          # for 990000.spi (runtime PM active because of the NVT-ts touch panel
+          # + pogo keyboard IRQ storm), which aborts every system suspend.
           USG_CAPTURE: ${{ (inputs.build_mode == 'capture' || inputs.build_mode == 'bisect') && '1' || '' }}
-          USG_CLEAN: ${{ (inputs.build_mode == 'clean' || inputs.build_mode == 'bisect') && '1' || '' }}
-          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean' || inputs.build_mode == 'bisect') && '1' || '' }}
+          USG_CLEAN: ${{ (inputs.build_mode == 'clean' || inputs.build_mode == 'bisect' || inputs.build_mode == 'spifix') && '1' || '' }}
+          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean' || inputs.build_mode == 'bisect' || inputs.build_mode == 'spifix') && '1' || '' }}
           USG_BISECT: ${{ inputs.build_mode == 'bisect' && '1' || '' }}
+          USG_SPIFIX: ${{ inputs.build_mode == 'spifix' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 

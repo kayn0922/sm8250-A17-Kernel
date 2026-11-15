@@ -142,6 +142,16 @@ if os.environ.get('USG_BISECT') == '1':
     want['CONFIG_SERIAL_MSM_GENI'] = 'y'
     print('[patch] BISECT: external SDX55M stack OFF (esoc*/MHI_NETDEV=n); AIROHA_GPS + SERIAL_MSM_GENI kept')
 
+# --- SPIFIX: keep pm_test available so the fix can be verified on device ---
+# PM_SLEEP_DEBUG only exposes /sys/power/pm_test; it does not change the
+# suspend path itself, so the resulting kernel is still a valid daily driver.
+if os.environ.get('USG_SPIFIX') == '1':
+    want.update({
+        'CONFIG_PM_DEBUG': 'y',
+        'CONFIG_PM_SLEEP_DEBUG': 'y',
+    })
+    print('[patch] SPIFIX: PM_SLEEP_DEBUG on (pm_test available for verification)')
+
 # 方案 A: drop the guard only on the diagnostic/capture build so the genuine
 # unplug+deep-sleep failure can occur and be observed/captured.
 # USG_CAPTURE=1 -> guard completely absent from the kernel (no config, no
@@ -516,6 +526,60 @@ else:
 PY
 else
     echo "[WARN] kona.dtsi missing - ramoops NOT added (capture disabled)"
+fi
+
+# ---------------------------------------------------------------------------
+# SPIFIX: real root cause of unplug + screen-off reboot (2026-11-15 pm_test).
+# Live evidence (BISECT kernel, cable unplugged, pm_test=devices):
+#   spi_geni 990000.spi: :spi_geni_suspend: runtime PM is active
+#   PM: Device 990000.spi failed to suspend: error -16
+#   Abort: Callback failed on 990000.spi in platform_pm_suspend returned -16
+# freezer succeeds (rc=0); every later stage fails (rc=1).
+# 990000.spi is qcom,spi-geni; its only child is spi0.0 = novatek,NVT-ts-spi
+# touch panel. The pogo keyboard IRQ storm + NVT-ts resume firmware update
+# keep issuing SPI transfers, so the controller is runtime-active exactly when
+# the PM core calls spi_geni_suspend(). CAF 4.19 returns -EBUSY there, which
+# aborts the WHOLE system suspend; Android retries in a loop until the SoC/PMIC
+# watchdog resets the board ~64s after unplug + screen-off (last_kmsg shows
+# only "Last boot reason: reboot", no oops/panic).
+# Fix = align with upstream spi-geni (5.x): system suspend must NOT veto sleep
+# because of runtime-PM accounting. Return 0 and let the PM core proceed.
+# ---------------------------------------------------------------------------
+if [ "${USG_SPIFIX:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/spi/spi-geni-qcom.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = "\t\tret = -EBUSY;\n\t\treturn ret;\n"
+new = ("\t\t/* spi-geni suspend fix (Xiaomi Pad 5 Pro, elish/enuma):\n"
+       "\t\t * child NVT-ts touch panel issues SPI transfers during its\n"
+       "\t\t * suspend/resume callbacks, so runtime PM can still be active\n"
+       "\t\t * here. Vetoing system suspend with -EBUSY makes Android retry\n"
+       "\t\t * forever until the watchdog resets the board. Upstream spi-geni\n"
+       "\t\t * simply returns 0 from system suspend; do the same.\n"
+       "\t\t */\n")
+if old not in s:
+    if "spi-geni suspend fix" in s:
+        print("[patch] SPIFIX already applied")
+    else:
+        print("[FATAL] SPIFIX anchor 'ret = -EBUSY; return ret;' not found")
+        sys.exit(1)
+else:
+    if s.count(old) != 1:
+        print("[FATAL] SPIFIX anchor not unique (%d)" % s.count(old))
+        sys.exit(1)
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print("[patch] SPIFIX applied: spi_geni_suspend() no longer returns -EBUSY")
+PY
+    if grep -q "spi-geni suspend fix" "$KDIR_ABS/drivers/spi/spi-geni-qcom.c"; then
+        echo "[patch] CONFIRMED: spi-geni suspend fix ACTIVE"
+    else
+        echo "[FATAL] spi-geni suspend fix NOT applied!"
+        exit 1
+    fi
+else
+    echo "[patch] SPIFIX not requested (stock spi-geni-qcom.c kept)"
 fi
 
 echo "[patch] done"
