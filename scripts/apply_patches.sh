@@ -28,9 +28,10 @@ if [ ! -f "$DEF" ]; then
     exit 1
 fi
 
-python3 - "$DEF" <<'PY'
+python3 - "$DEF" "$DEVICE" <<'PY'
 import re, sys, os
 path = sys.argv[1]
+device = sys.argv[2]
 want = {
     # Android 16/17 framework requirements
     'CONFIG_ANDROID': 'y',
@@ -93,6 +94,29 @@ want = {
     # For the diagnostic/capture build pass USG_DISABLE=1 so the real crash can
     # happen and be recorded by ramoops (kona.dtsi ramoops node, below).
 }
+# --- Device-variant correctness -------------------------------------------
+# The "GNSS / modem transport" block above exists for enuma (5G, external
+# SDX55M). elish is the WiFi-only variant and its defconfig deliberately does
+# NOT enable that stack. Forcing it into an elish build makes the Android
+# framework bring up a 5G telephony path that is not present, which crash-loops
+# com.android.phone (ClassNotFoundException: com.qti.extphone.ExtTelephonyManager)
+# and ends in a framework-initiated reboot.
+# For elish we merely STOP FORCING these options: the defconfig's own lines are
+# left untouched (nothing is disabled), so the result is a genuine elish kernel.
+if device != 'enuma':
+    for k in (
+        'CONFIG_AIROHA_GPS', 'CONFIG_QRTR', 'CONFIG_QRTR_SMD', 'CONFIG_QRTR_MHI',
+        'CONFIG_QCOM_QMI_HELPERS', 'CONFIG_RPMSG_QCOM_GLINK_SMEM',
+        'CONFIG_QCOM_GLINK', 'CONFIG_DIAG_CHAR',
+        'CONFIG_ESOC', 'CONFIG_ESOC_DEV', 'CONFIG_ESOC_CLIENT',
+        'CONFIG_ESOC_MDM_4X', 'CONFIG_ESOC_MDM_DRV',
+        'CONFIG_MHI_BUS', 'CONFIG_MHI_QCOM', 'CONFIG_MHI_NETDEV',
+        'CONFIG_MSM_SUBSYSTEM_RESTART', 'CONFIG_MSM_PIL',
+        'CONFIG_MSM_PIL_SSR_GENERIC', 'CONFIG_CNSS2', 'CONFIG_CNSS2_QMI',
+    ):
+        want.pop(k, None)
+    print('[patch] device=%s: elish/native defconfig, skipped enuma-only SDX55M modem options' % device)
+
 # 方案 A: drop the guard only on the diagnostic/capture build so the genuine
 # unplug+deep-sleep failure can occur and be observed/captured.
 # USG_CAPTURE=1 -> guard completely absent from the kernel (no config, no
