@@ -239,7 +239,9 @@ fi
 # patch is required.
 # ---------------------------------------------------------------------------
 SSR_PATCH="$BUILDER_DIR/patches/0001-soc-qcom-subsystem_restart-decouple-esoc0.patch"
-if [ "${USG_CLEAN:-0}" = "1" ]; then
+# USG_KEEP_0001=1 lets a CLEAN-based build keep the proven GNSS/WiFi fix
+# (spifix1). Without it the SDX55M errfatal drags wlan down and GPS degrades.
+if [ "${USG_CLEAN:-0}" = "1" ] && [ "${USG_KEEP_0001:-0}" != "1" ]; then
     echo "[patch] CLEAN build: 0001 esoc0/SSR patch SKIPPED (stock subsystem_restart.c kept)"
 elif [ -f "$SSR_PATCH" ]; then
     if git apply --check "$SSR_PATCH" 2>/dev/null; then
@@ -260,7 +262,7 @@ fi
 
 # SSR 补丁落地校验: 防止 git apply / patch 静默失败导致补丁没进内核
 # (上一次就因此漏修 —— 0001 没编进去, esoc0 仍每 ~13s 重启)
-if [ "${USG_CLEAN:-0}" = "1" ]; then
+if [ "${USG_CLEAN:-0}" = "1" ] && [ "${USG_KEEP_0001:-0}" != "1" ]; then
     echo "[patch] CLEAN build: 0001 intentionally absent (stock SSR code)"
 elif grep -q "decoupled esoc0 from SSR restart order" drivers/soc/qcom/subsystem_restart.c 2>/dev/null; then
     echo "[patch] CONFIRMED: esoc0 decouple block present in subsystem_restart.c (GPS-recover + WiFi-stable fix ACTIVE)"
