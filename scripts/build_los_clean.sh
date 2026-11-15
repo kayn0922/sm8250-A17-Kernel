@@ -51,6 +51,26 @@ fi
 # Xiaomi DTS entries are symlinks, so count both regular files and links.
 echo "[LOS] xiaomi dts entries: $(find "$K/arch/arm64/boot/dts/vendor/xiaomi" \( -type f -o -type l \) | wc -l)"
 
+# --- 1b) Port the donor's device guard for the Xiaomi PS5169 redriver -------
+# LOS calls ps5169_cfg_usb() unconditionally from dwc3-msm.c (both OTG start
+# paths), but CONFIG_PS5169 is not enabled for enuma, so the link fails with
+# "undefined reference to `ps5169_cfg_usb'". The donor tree guards the exact
+# same two calls with CONFIG_MACH_XIAOMI_DAGU (that chip exists on dagu only).
+# Restore the same guard; this is a device-gating fix, no new driver code.
+python3 - "$K/drivers/usb/dwc3/dwc3-msm.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = "\t\tif (!has_dp_flag)\n\t\t\tps5169_cfg_usb();\n"
+new = ("#if defined(CONFIG_MACH_XIAOMI_DAGU) && !defined(CONFIG_NO_PS_USB3)\n"
+       + old + "#endif\n")
+n = s.count(old)
+print("[LOS] ps5169 unguarded call sites:", n)
+if n == 0:
+    raise SystemExit("[LOS] FATAL: dwc3-msm.c layout changed, cannot patch safely")
+open(p, "w").write(s.replace(old, new))
+PY
+
 # --- 2) Configuration ------------------------------------------------------
 # The donor defconfig is the exact one used by every previous (bootable)
 # build, so the source tree is the ONLY variable in this experiment.
