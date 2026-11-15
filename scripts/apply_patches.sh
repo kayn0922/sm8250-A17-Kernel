@@ -29,7 +29,7 @@ if [ ! -f "$DEF" ]; then
 fi
 
 python3 - "$DEF" <<'PY'
-import re, sys
+import re, sys, os
 path = sys.argv[1]
 want = {
     # Android 16/17 framework requirements
@@ -73,10 +73,56 @@ want = {
     # isolation patch (below) has a wlan subsystem to protect.
     'CONFIG_CNSS2': 'y',
     'CONFIG_CNSS2_QMI': 'y',
-    # Unplug + deep-sleep reboot guard: self-contained kernel module
-    # (drivers/misc/unplug_suspend_guard.c) wired in below.
-    'CONFIG_UNPLUG_SUSPEND_GUARD': 'y',
+    # 方案 A: pstore so kernel panics survive a reboot and can be read from
+    # /sys/fs/pstore. Needed to root-cause the unplug+deep-sleep reboot.
+    # NOTE: in this 4.19 tree the ramoops *platform driver* is fs/pstore/ram.c
+    # and is enabled by CONFIG_PSTORE_RAM - there is NO CONFIG_RAMOOPS symbol
+    # (forcing it is silently dropped by olddefconfig, it is not an error).
+    # Compression is turned OFF so the dumped dmesg/console is plain text.
+    'CONFIG_PSTORE': 'y',
+    'CONFIG_PSTORE_RAM': 'y',
+    'CONFIG_PSTORE_CONSOLE': 'y',
+    'CONFIG_PSTORE_PMSG': 'y',
+    'CONFIG_PSTORE_DEFLATE_COMPRESS': 'n',
+    # 方案 A 兜底: netconsole 实时把内核 printk 发到局域网 PC, 不依赖 ramoops
+    # 持久内存 (本设备 ramoops 动态预留区在深睡后被 TZ 清空, 故加此路)。
+    # CONFIG_NETCONSOLE_DYNAMIC 允许运行时经 configfs 设定目标 PC IP, 无需重编。
+    'CONFIG_NETCONSOLE': 'y',
+    'CONFIG_NETCONSOLE_DYNAMIC': 'y',
+    # Unplug + deep-sleep reboot guard (方案 A safety net). Kept ON by default.
+    # For the diagnostic/capture build pass USG_DISABLE=1 so the real crash can
+    # happen and be recorded by ramoops (kona.dtsi ramoops node, below).
 }
+# 方案 A: drop the guard only on the diagnostic/capture build so the genuine
+# unplug+deep-sleep failure can occur and be observed/captured.
+# USG_CAPTURE=1 -> guard completely absent from the kernel (no config, no
+# module wiring) AND extra diagnostic features turned on (see below).
+# USG_DISABLE=1 -> guard config only, module still compiled but not force-enabled.
+if os.environ.get('USG_CAPTURE') == '1':
+    # Diagnostic/capture build. Turn on the tooling needed to actually SEE the
+    # unplug+deep-sleep failure:
+    #   - PM_SLEEP_DEBUG   : exposes /sys/power/pm_test so we can run each
+    #                        suspend phase (freezer->devices->platform->core)
+    #                        and localize which driver dies, waking immediately.
+    #   - NETCONSOLE(_DYNAMIC): real-time printk over LAN as a ramoops backup.
+    #   - DETECT_HUNG_TASK / SOFTLOCKUP_DETECTOR: force a panic+call-trace if
+    #     the failure is a suspend/resume HANG (instead of a silent HW reset).
+    #   - PANIC_ON_OOPS + PANIC_TIMEOUT=5: an oops becomes a panic that
+    #     reboots after 5s so pstore/ramoops can be read back.
+    # DEBUG_KERNEL is pulled in because HUNG_TASK/SOFTLOCKUP depend on it.
+    want.update({
+        'CONFIG_DEBUG_KERNEL': 'y',
+        'CONFIG_PM_DEBUG': 'y',
+        'CONFIG_PM_SLEEP_DEBUG': 'y',
+        'CONFIG_NETCONSOLE': 'y',
+        'CONFIG_NETCONSOLE_DYNAMIC': 'y',
+        'CONFIG_DETECT_HUNG_TASK': 'y',
+        'CONFIG_SOFTLOCKUP_DETECTOR': 'y',
+        'CONFIG_PANIC_ON_OOPS': 'y',
+        'CONFIG_PANIC_TIMEOUT': '5',
+    })
+elif os.environ.get('USG_DISABLE') != '1':
+    want['CONFIG_UNPLUG_SUSPEND_GUARD'] = 'y'
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
 keys = set(want)
@@ -239,7 +285,13 @@ PY
 # charger / PD / fuel-gauge driver, so charging and other features are untouched.
 # ---------------------------------------------------------------------------
 USG_C="$BUILDER_DIR/patches/unplug_suspend_guard.c"
-if [ -f "$USG_C" ]; then
+if [ "${USG_CAPTURE:-0}" = "1" ]; then
+    # Diagnostic/capture build: the guard MUST NOT be compiled in. It holds a
+    # suspend wakelock while USB is unplugged, which is exactly what keeps the
+    # genuine unplug+deep-sleep panic from happening (so there would be
+    # nothing for pstore/ramoops to capture). Skip the module entirely.
+    echo "[patch] capture build (USG_CAPTURE=1): unplug_suspend_guard NOT wired in"
+elif [ -f "$USG_C" ]; then
     cp "$USG_C" "$KDIR_ABS/drivers/misc/unplug_suspend_guard.c"
     echo "[patch] copied unplug_suspend_guard.c -> drivers/misc/"
 
@@ -249,7 +301,7 @@ if [ -f "$USG_C" ]; then
     fi
 
     if ! grep -q "UNPLUG_SUSPEND_GUARD" "$KDIR_ABS/drivers/misc/Kconfig"; then
-        printf '\nconfig UNPLUG_SUSPEND_GUARD\n\ttristate "Unplug + deep-sleep reboot guard (sm8250)"\n\tdepends on PM_SLEEP && POWER_SUPPLY\n\tdefault y\n\thelp\n\t  Holds a suspend wakelock while USB is unplugged to prevent the\n\t  unplug+deep-sleep reboot seen on Xiaomi Pad 5 Pro (elish/enuma).\n\t  Self-contained; does not modify charger/PD/fuel-gauge drivers.\n\t  Toggle at runtime via the hold_while_unplugged module param.\n' >> "$KDIR_ABS/drivers/misc/Kconfig"
+        printf '\nconfig UNPLUG_SUSPEND_GUARD\n\ttristate "Unplug + deep-sleep reboot guard (sm8250)"\n\tdepends on PM_SLEEP && POWER_SUPPLY\n\tdefault n\n\thelp\n\t  Holds a suspend wakelock while USB is unplugged to prevent the\n\t  unplug+deep-sleep reboot seen on Xiaomi Pad 5 Pro (elish/enuma).\n\t  Self-contained; does not modify charger/PD/fuel-gauge drivers.\n\t  Toggle at runtime via the hold_while_unplugged module param.\n' >> "$KDIR_ABS/drivers/misc/Kconfig"
         echo "[patch] drivers/misc/Kconfig: added UNPLUG_SUSPEND_GUARD"
     fi
 
@@ -261,6 +313,77 @@ if [ -f "$USG_C" ]; then
     fi
 else
     echo "[WARN] $USG_C missing - skipping unplug_suspend_guard (reboot guard absent)"
+fi
+
+# ---------------------------------------------------------------------------
+# 方案 A: ramoops / pstore capture region. Insert a ramoops node into the SoC
+# reserved_memory (kona.dtsi) so kernel panics survive reboot and can be read
+# from /sys/fs/pstore after the device boots back up.
+#   Address 0x100000000 (4GB) lies in free RAM ABOVE every static carveout
+#   (the highest one, dfps_data_memory, ends at 0x9e400000). It is valid for
+#   both 6GB and 8GB RAM configs. Always sanity-check with
+#   `adb shell cat /proc/iomem` on the target device before flashing a new
+#   device, in case the bootloader reserves extra high-memory regions.
+# ---------------------------------------------------------------------------
+KONA="$KDIR_ABS/arch/arm64/boot/dts/vendor/qcom/kona.dtsi"
+if [ -f "$KONA" ]; then
+python3 - "$KONA" <<'PY'
+import sys, os
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'ramoops' in s:
+    print('[patch] kona.dtsi: ramoops node already present, skipping')
+else:
+    marker = 'reserved_memory: reserved-memory {'
+    idx = s.find(marker)
+    if idx == -1:
+        print('[WARN] kona.dtsi: reserved_memory node not found - ramoops NOT added')
+    else:
+        # 用括号配对精确找到 reserved_memory 自己的闭合 '}'，避免误插入到
+        # root 闭合处（之前用 s.find('\n};') 会命中顶格的 root 闭合，导致
+        # ramoops 成为 root 直接子节点、不被 ramoops 驱动识别、且可能干扰启动）。
+        ob = s.find('{', idx)
+        depth = 0
+        close = -1
+        i = ob
+        while i < len(s):
+            c = s[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    close = i
+                    break
+            i += 1
+        if close == -1:
+            print('[WARN] kona.dtsi: could not locate reserved_memory closing brace')
+        else:
+            node = ('\t\tramoops_mem: ramoops@100000000 {\n'
+                    '\t\t\tcompatible = "ramoops";\n'
+                    '\t\t\treg = <0x1 0x00000000 0x0 0x00100000>;\n'
+                    '\t\t\trecord-size = <0x00040000>;\n'
+                    '\t\t\tconsole-size = <0x00040000>;\n'
+                    '\t\t\tftrace-size = <0x00040000>;\n'
+                    '\t\t\tpmsg-size = <0x00040000>;\n'
+                    '\t\t\tecc-size = <16>;\n'
+                    '\t\t\tno-map;\n'
+                    '\t\t};\n')
+            # ALWAYS inject the ramoops reserved region (idempotent: skipped
+            # above if already present). It is inert unless the kernel enables
+            # PSTORE_RAM, and it moves the crash log out of the bootloader's
+            # dynamic ramoops_memreserve region (0xB0000000) which is plain
+            # System RAM and gets cleared by TZ on resume -> garbage. Declaring
+            # it as a DTB "no-map" reservation at 0x100000000 (verified free
+            # System RAM on this device) makes TZ preserve it across deep sleep.
+            # record-size 0x40000 also turns the dmesg backend ON, so panics
+            # survive reboot (the previous build had record_size=0 -> no capture).
+            s = s[:close] + '\n' + node + s[close:]
+            open(p, 'w', encoding='utf-8').write(s)
+            print('[patch] kona.dtsi: inserted ramoops node @0x100000000 (1MB, no-map, record/console/ftrace/pmsg=256KB, ecc=16)')
+PY
+else
+    echo "[WARN] kona.dtsi missing - ramoops NOT added (capture disabled)"
 fi
 
 echo "[patch] done"

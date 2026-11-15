@@ -27,6 +27,12 @@ on:
         default: 'none'
         type: choice
         options: [none, dagu-minimal-node]
+      build_mode:
+        description: 'stable = guard ON (daily driver); capture = guard OFF + debug (catch the unplug+sleep reboot)'
+        required: true
+        default: 'stable'
+        type: choice
+        options: [stable, capture]
 
 permissions:
   contents: write
@@ -70,6 +76,10 @@ jobs:
           ls "$HOME/ZyC-clang/bin/clang" && "$HOME/ZyC-clang/bin/clang" --version | head -2
 
       - name: Apply A17 compatibility + GPS kernel-side patches
+        env:
+          # capture build: disable the unplug-suspend guard (so the real bug
+          # fires) and turn on PM_SLEEP_DEBUG / lockup detectors / netconsole.
+          USG_CAPTURE: ${{ inputs.build_mode == 'capture' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 
