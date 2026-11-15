@@ -242,6 +242,48 @@ else
     echo "[FATAL] unplug+sleep watchdog fix NOT found in smb5-lib.c - 0002 patch did NOT land!"
 fi
 
+# ---------------------------------------------------------------------------
+# cgroup v2 freezer race fix -- THE real unplug+deep-sleep reboot root cause.
+# kernel/cgroup/freezer.c::cgroup_leave_frozen() relied on recalc_sigpending(),
+# which races with vfork()/do_signal_stop(): a task can be left logically frozen
+# while the cgroup spuriously reports "unfrozen"; that task never re-enters
+# do_freezer_trap() and stays stuck forever, so the whole system hangs until the
+# SoC hardware watchdog reboots it (~64s later, bootloader reports
+# bootreason=reboot, no kernel panic dump -- exactly what was observed). Going to
+# deep sleep freezes all tasks, so this race is hit on unplug+screen-off.
+# Fix = upstream 7a05073b: mark the task JOBCTL_TRAP_FREEZE + TIF_SIGPENDING so
+# it is guaranteed to pass through do_freezer_trap() before returning to
+# userspace. Applied on EVERY build (stable and capture) -- this is the fix.
+# (Reference: https://github.com/tntgdh-beep/elish-kernel-fix , same elish HW,
+#  same 4.19.325-cip base; the buggy freezer.c was confirmed in our exact tree.)
+# ---------------------------------------------------------------------------
+CGROUP_PATCH="$BUILDER_DIR/patches/0003-cgroup-freezer-fix.patch"
+if [ "${USG_CAPTURE:-0}" = "1" ]; then
+    echo "[patch] capture build (USG_CAPTURE=1): cgroup freezer fix SKIPPED (bug must stay observable)"
+elif [ -f "$CGROUP_PATCH" ]; then
+    if git apply --check "$CGROUP_PATCH" 2>/dev/null; then
+        git apply "$CGROUP_PATCH" && echo "[patch] applied $CGROUP_PATCH"
+    else
+        echo "[patch] $CGROUP_PATCH does not apply cleanly; trying patch -p1 --fuzz=3"
+        if patch -p1 --fuzz=3 < "$CGROUP_PATCH" 2>/dev/null; then
+            echo "[patch] applied $CGROUP_PATCH via patch -p1"
+        else
+            echo "[FATAL] $CGROUP_PATCH NOT applied - cgroup freezer root fix missing!"
+        fi
+    fi
+else
+    echo "[WARN] $CGROUP_PATCH missing - skipping cgroup freezer fix"
+fi
+
+# cgroup freezer 修复落地校验 (防止 git apply / patch 静默失败)
+if [ "${USG_CAPTURE:-0}" != "1" ] && grep -q "set_thread_flag(TIF_SIGPENDING)" kernel/cgroup/freezer.c 2>/dev/null; then
+    echo "[patch] CONFIRMED: cgroup freezer fix present in freezer.c (race fix ACTIVE)"
+elif [ "${USG_CAPTURE:-0}" = "1" ]; then
+    echo "[patch] capture build: cgroup freezer fix intentionally absent"
+else
+    echo "[FATAL] cgroup freezer fix NOT found in freezer.c - 0003 patch did NOT land!"
+fi
+
 echo "=== verification ==="
 grep -E '^CONFIG_(AIROHA_GPS|QRTR|QMI_HELPERS|ANDROID_BINDERFS|BPF_SYSCALL|ESOC|MHI_BUS|MHI_QCOM|CNSS2|MSM_SUBSYSTEM_RESTART)=' "$DEF"
 echo "=== device DTS GPS node ==="

@@ -28,7 +28,7 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = guard OFF + watchdog root-fix ON (native sleep, daily driver); capture = guard OFF + debug ON + watchdog fix OFF (catch the unplug+sleep reboot)'
+        description: 'stable = root fixes ON (cgroup-freezer race fix 0003 + charger watchdog safe-off 0002), native sleep, daily driver; capture = all fixes OFF + debug ON (catch the unplug+sleep reboot live)'
         required: true
         default: 'stable'
         type: choice
