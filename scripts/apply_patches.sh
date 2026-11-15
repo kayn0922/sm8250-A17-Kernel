@@ -735,4 +735,86 @@ else
     echo "[patch] GENI_SERIAL_FIX not requested (stock msm_geni_serial.c kept)"
 fi
 
+# ---------------------------------------------------------------------------
+# USG_SHALLOW (spifix4): skip the vendor SoC power-collapse entry point.
+#
+# Evidence gathered on the device:
+#   * pm_test=core (all devices + syscore suspended, suspend_ops->enter NOT
+#     called) always exits cleanly -> everything up to syscore_suspend is fine.
+#   * real deep sleep calls suspend_ops->enter() -> hard reset, no pstore.
+#   * runtime mem_sleep=s2idle also resets: this tree has a vendor change in
+#     suspend_enter() that jumps into s2idle_loop() BEFORE dpm_suspend_noirq.
+#   * runtime lpm_levels.sleep_disabled=Y (alone or with s2idle) also resets.
+# Conclusion: the downstream QCOM RPMH/AOP/PSCI power-collapse path is broken
+# on this source tree. Keep the full device/syscore suspend (real power saving)
+# but idle the boot CPU in WFI instead of handing control to the SoC firmware.
+# A module_param allows reverting to the stock path without reflashing.
+# ---------------------------------------------------------------------------
+if [ "${USG_SHALLOW:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/kernel/power/suspend.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_SHALLOW' in s:
+    print('[patch] USG_SHALLOW already applied')
+else:
+    inc = '#include <linux/wakeup_reason.h>\n'
+    if s.count(inc) != 1:
+        print('[FATAL] SHALLOW: include anchor count %d' % s.count(inc)); sys.exit(1)
+    s = s.replace(inc, inc + '#include <linux/timekeeping.h>\n#include <linux/irqflags.h>\n', 1)
+
+    fn = 'static int suspend_enter(suspend_state_t state, bool *wakeup)\n'
+    if s.count(fn) != 1:
+        print('[FATAL] SHALLOW: suspend_enter anchor count %d' % s.count(fn)); sys.exit(1)
+    helper = '''/* spifix4: this downstream tree hard-resets inside the vendor SoC power
+ * collapse path (RPMH/AOP/PSCI). Devices and syscore are already suspended
+ * here, so wait in WFI on the boot CPU until a wakeup event is pending.
+ */
+static bool usg_shallow = true;
+module_param(usg_shallow, bool, 0644);
+MODULE_PARM_DESC(usg_shallow, "skip vendor power collapse, idle in WFI");
+
+static void usg_shallow_suspend_loop(void)
+{
+\tu64 deadline = ktime_get_mono_fast_ns() + 600ULL * 1000000000ULL;
+
+\tpr_info("USG_SHALLOW: WFI loop entered (no SoC power collapse)\\n");
+\twhile (!pm_wakeup_pending()) {
+\t\tif (ktime_get_mono_fast_ns() >= deadline) {
+\t\t\tpr_info("USG_SHALLOW: timeout, resuming\\n");
+\t\t\tbreak;
+\t\t}
+\t\tlocal_irq_enable();
+\t\tasm volatile("wfi" : : : "memory");
+\t\tlocal_irq_disable();
+\t}
+\tpr_info("USG_SHALLOW: wakeup pending, leaving WFI loop\\n");
+}
+
+'''
+    s = s.replace(fn, helper + fn, 1)
+
+    old = '\t\t\terror = suspend_ops->enter(state);\n'
+    new = ('\t\t\tif (usg_shallow) {\n'
+           '\t\t\t\tusg_shallow_suspend_loop();\n'
+           '\t\t\t\terror = 0;\n'
+           '\t\t\t} else {\n'
+           '\t\t\t\terror = suspend_ops->enter(state);\n'
+           '\t\t\t}\n')
+    if s.count(old) != 1:
+        print('[FATAL] SHALLOW: enter anchor count %d' % s.count(old)); sys.exit(1)
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('[patch] USG_SHALLOW applied: suspend_ops->enter replaced by WFI loop')
+PY
+    if grep -q "USG_SHALLOW: WFI loop entered" "$KDIR_ABS/kernel/power/suspend.c"; then
+        echo "[patch] CONFIRMED: spifix4 shallow suspend ACTIVE"
+    else
+        echo "[FATAL] spifix4 shallow suspend NOT applied!"
+        exit 1
+    fi
+else
+    echo "[patch] USG_SHALLOW not requested (stock kernel/power/suspend.c kept)"
+fi
+
 echo "[patch] done"

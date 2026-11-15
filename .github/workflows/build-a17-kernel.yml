@@ -28,11 +28,11 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF; spifix = clean + spi_geni fix; spifix1 = spifix + 0001 GNSS fix; spifix2 = spifix1 + geni-serial noirq fix; spifix3 = spifix2 + force runtime suspend/resume of both GENI devices'
+        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF; spifix = clean + spi_geni fix; spifix1 = spifix + 0001 GNSS fix; spifix2 = spifix1 + geni-serial noirq fix; spifix3 = spifix2 + force runtime suspend/resume of both GENI devices; spifix4 = spifix3 + shallow WFI suspend (skip vendor SoC power collapse)'
         required: true
         default: 'stable'
         type: choice
-        options: [stable, clean, guard, capture, bisect, spifix, spifix1, spifix2, spifix3]
+        options: [stable, clean, guard, capture, bisect, spifix, spifix1, spifix2, spifix3, spifix4]
 
 permissions:
   contents: write
@@ -93,13 +93,14 @@ jobs:
           # for 990000.spi (runtime PM active because of the NVT-ts touch panel
           # + pogo keyboard IRQ storm), which aborts every system suspend.
           USG_CAPTURE: ${{ (inputs.build_mode == 'capture' || inputs.build_mode == 'bisect') && '1' || '' }}
-          USG_CLEAN: ${{ (inputs.build_mode == 'clean' || inputs.build_mode == 'bisect' || inputs.build_mode == 'spifix' || inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3') && '1' || '' }}
-          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean' || inputs.build_mode == 'bisect' || inputs.build_mode == 'spifix' || inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3') && '1' || '' }}
+          USG_CLEAN: ${{ (inputs.build_mode == 'clean' || inputs.build_mode == 'bisect' || inputs.build_mode == 'spifix' || inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4') && '1' || '' }}
+          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean' || inputs.build_mode == 'bisect' || inputs.build_mode == 'spifix' || inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4') && '1' || '' }}
           USG_BISECT: ${{ inputs.build_mode == 'bisect' && '1' || '' }}
-          USG_SPIFIX: ${{ (inputs.build_mode == 'spifix' || inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3') && '1' || '' }}
-          USG_KEEP_0001: ${{ (inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3') && '1' || '' }}
-          USG_GENI_SERIAL_FIX: ${{ (inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3') && '1' || '' }}
-          USG_FORCE_RPM: ${{ inputs.build_mode == 'spifix3' && '1' || '' }}
+          USG_SPIFIX: ${{ (inputs.build_mode == 'spifix' || inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4') && '1' || '' }}
+          USG_KEEP_0001: ${{ (inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4') && '1' || '' }}
+          USG_GENI_SERIAL_FIX: ${{ (inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4') && '1' || '' }}
+          USG_FORCE_RPM: ${{ (inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4') && '1' || '' }}
+          USG_SHALLOW: ${{ inputs.build_mode == 'spifix4' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 
