@@ -28,11 +28,11 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = patches 0001/0002/0003 ON + guard OFF; clean = ALL three patches OFF + guard OFF (stock SSR/charger/freezer code, functional enuma config kept); capture = fixes OFF + debug ON'
+        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF (AIROHA_GPS/GENI kept)'
         required: true
         default: 'stable'
         type: choice
-        options: [stable, clean, guard, capture]
+        options: [stable, clean, guard, capture, bisect]
 
 permissions:
   contents: write
@@ -81,9 +81,17 @@ jobs:
           #   sleep, zero extra power, reboot gone. This is the daily-driver build.
           # capture: guard OFF + debug ON + watchdog fix OFF -> the real bug
           #   still fires so it can be observed/captured by ramoops/netconsole.
-          USG_CAPTURE: ${{ inputs.build_mode == 'capture' && '1' || '' }}
-          USG_CLEAN: ${{ inputs.build_mode == 'clean' && '1' || '' }}
-          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean') && '1' || '' }}
+          # bisect = clean (stock SSR/charger/freezer, no guard) + capture
+          # (PM_SLEEP_DEBUG / netconsole / ramoops / panic-on-oops so pm_test
+          # can localise the failing suspend stage) + USG_BISECT (external
+          # SDX55M stack OFF). One build answers BOTH open questions:
+          #   no reboot  -> the ESOC stack was the regression
+          #   still reboot-> run /sys/power/pm_test with netconsole to find
+          #                  which suspend stage resets the SoC
+          USG_CAPTURE: ${{ (inputs.build_mode == 'capture' || inputs.build_mode == 'bisect') && '1' || '' }}
+          USG_CLEAN: ${{ (inputs.build_mode == 'clean' || inputs.build_mode == 'bisect') && '1' || '' }}
+          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean' || inputs.build_mode == 'bisect') && '1' || '' }}
+          USG_BISECT: ${{ inputs.build_mode == 'bisect' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 
@@ -114,6 +122,7 @@ jobs:
             - device: `${{ inputs.device }}`
             - root: `${{ inputs.ksu }}` (ksu = ReSukiSU + SuSFS + KPM)
             - target: `${{ inputs.target_system }}`
+            - build_mode: `${{ inputs.build_mode }}`
             - gps_dts_fix: `${{ inputs.gps_dts_fix }}`
 
             **HyperOS / OS4 users: flash `Kernel_MIUI_*.zip` only.** AOSP builds blackscreen on HyperOS.

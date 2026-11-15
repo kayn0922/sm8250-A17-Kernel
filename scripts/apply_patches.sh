@@ -117,6 +117,31 @@ if device != 'enuma':
         want.pop(k, None)
     print('[patch] device=%s: elish/native defconfig, skipped enuma-only SDX55M modem options' % device)
 
+# --- BISECT: turn OFF the external SDX55M modem stack ----------------------
+# Live-device evidence (2026-11-15): ro.product.name=elish (WiFi-only ROM),
+# yet the enuma kernel registers /sys/bus/esoc/devices/esoc0 and
+# /dev/subsys_esoc0, while the framework complains it cannot find
+# android.hardware.radio.modem.IRadioModem/slot1 in the VINTF manifest.
+# Hypothesis: the external-modem SSR/subsystem resume path is what silently
+# resets the SoC during unplug + deep sleep (the official elish kernel has no
+# ESOC stack at all and never reboots).
+# This build removes that stack but KEEPS the two things we actually need:
+#   CONFIG_AIROHA_GPS      -> GPS chip driver (UART, not modem)
+#   CONFIG_SERIAL_MSM_GENI -> keyboard GENI serial
+# MHI_BUS / MHI_QCOM / CNSS2 / QRTR / PIL are deliberately LEFT ON: they also
+# carry the QCA6390 WLAN (device shows /dev/mhi_0306_* pipes) and the other
+# subsystems (adsp/cdsp/slpi); turning them off would kill WiFi, not just 5G.
+if os.environ.get('USG_BISECT') == '1':
+    for k in (
+        'CONFIG_ESOC', 'CONFIG_ESOC_DEV', 'CONFIG_ESOC_CLIENT',
+        'CONFIG_ESOC_MDM_4X', 'CONFIG_ESOC_MDM_DRV',
+        'CONFIG_MHI_NETDEV',
+    ):
+        want[k] = 'n'
+    want['CONFIG_AIROHA_GPS'] = 'y'
+    want['CONFIG_SERIAL_MSM_GENI'] = 'y'
+    print('[patch] BISECT: external SDX55M stack OFF (esoc*/MHI_NETDEV=n); AIROHA_GPS + SERIAL_MSM_GENI kept')
+
 # 方案 A: drop the guard only on the diagnostic/capture build so the genuine
 # unplug+deep-sleep failure can occur and be observed/captured.
 # USG_CAPTURE=1 -> guard completely absent from the kernel (no config, no
