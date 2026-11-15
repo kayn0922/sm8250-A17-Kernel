@@ -205,6 +205,43 @@ else
     echo "[FATAL] esoc0 decouple block NOT found in subsystem_restart.c - 0001 patch did NOT land!"
 fi
 
+# ---------------------------------------------------------------------------
+# Unplug + deep-sleep reboot ROOT FIX (replaces the wakelock guard).
+# The PM8150B bark watchdog is petted ONLY by wdog_bark_irq_handler(), but the
+# bark IRQ is suppressed at the PMIC level whenever the USB input is suspended
+# ("On USB suspend, WDOG IRQ stops triggering", smblib_handle_therm_regulation).
+# So on unplug the dog is never petted during deep sleep and the PMIC hard-resets
+# the device (~64s later). This patch disables the charger watchdog timer while
+# the USB input is suspended and restores it on plugin/resume. Applied on every
+# build EXCEPT the capture build, which must keep the bug alive to observe it.
+# ---------------------------------------------------------------------------
+WDOG_PATCH="$BUILDER_DIR/patches/0002-smb5-unplug-watchdog-fix.patch"
+if [ "${USG_CAPTURE:-0}" = "1" ]; then
+    echo "[patch] capture build (USG_CAPTURE=1): watchdog fix SKIPPED (bug must stay observable)"
+elif [ -f "$WDOG_PATCH" ]; then
+    if git apply --check "$WDOG_PATCH" 2>/dev/null; then
+        git apply "$WDOG_PATCH" && echo "[patch] applied $WDOG_PATCH"
+    else
+        echo "[patch] $WDOG_PATCH does not apply cleanly; trying patch -p1 --fuzz=3"
+        if patch -p1 --fuzz=3 < "$WDOG_PATCH" 2>/dev/null; then
+            echo "[patch] applied $WDOG_PATCH via patch -p1"
+        else
+            echo "[FATAL] $WDOG_PATCH NOT applied - unplug+sleep reboot root fix missing!"
+        fi
+    fi
+else
+    echo "[WARN] $WDOG_PATCH missing - skipping unplug+sleep watchdog fix"
+fi
+
+# 看门狗修复落地校验 (防止 git apply / patch 静默失败)
+if [ "${USG_CAPTURE:-0}" != "1" ] && grep -q "deep-sleep watchdog fix (Xiaomi Pad 5 Pro" drivers/power/supply/qcom/smb5-lib.c 2>/dev/null; then
+    echo "[patch] CONFIRMED: unplug+sleep watchdog fix present in smb5-lib.c (root fix ACTIVE)"
+elif [ "${USG_CAPTURE:-0}" = "1" ]; then
+    echo "[patch] capture build: watchdog fix intentionally absent"
+else
+    echo "[FATAL] unplug+sleep watchdog fix NOT found in smb5-lib.c - 0002 patch did NOT land!"
+fi
+
 echo "=== verification ==="
 grep -E '^CONFIG_(AIROHA_GPS|QRTR|QMI_HELPERS|ANDROID_BINDERFS|BPF_SYSCALL|ESOC|MHI_BUS|MHI_QCOM|CNSS2|MSM_SUBSYSTEM_RESTART)=' "$DEF"
 echo "=== device DTS GPS node ==="

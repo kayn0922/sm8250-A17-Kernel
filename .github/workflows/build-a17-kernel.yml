@@ -28,7 +28,7 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = guard ON (daily driver); capture = guard OFF + debug (catch the unplug+sleep reboot)'
+        description: 'stable = guard OFF + watchdog root-fix ON (native sleep, daily driver); capture = guard OFF + debug ON + watchdog fix OFF (catch the unplug+sleep reboot)'
         required: true
         default: 'stable'
         type: choice
@@ -77,9 +77,12 @@ jobs:
 
       - name: Apply A17 compatibility + GPS kernel-side patches
         env:
-          # capture build: disable the unplug-suspend guard (so the real bug
-          # fires) and turn on PM_SLEEP_DEBUG / lockup detectors / netconsole.
+          # stable (default): guard OFF + watchdog root-fix ON -> native deep
+          #   sleep, zero extra power, reboot gone. This is the daily-driver build.
+          # capture: guard OFF + debug ON + watchdog fix OFF -> the real bug
+          #   still fires so it can be observed/captured by ramoops/netconsole.
           USG_CAPTURE: ${{ inputs.build_mode == 'capture' && '1' || '' }}
+          USG_DISABLE: ${{ inputs.build_mode == 'stable' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 

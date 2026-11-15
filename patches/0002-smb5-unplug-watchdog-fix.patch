@@ -1,0 +1,49 @@
+From: enuma-fix <enuma@local>
+Subject: [PATCH] power: qcom: smb5: disable charger watchdog while USB input is suspended (unplug + deep-sleep reboot fix)
+
+On Xiaomi Pad 5 Pro (elish/enuma) unplugging the USB cable while the screen
+is off causes a silent hard reset ~64s later. Root cause: the PM8150B bark
+watchdog is petted only by wdog_bark_irq_handler(), but the bark interrupt is
+suppressed at the PMIC level whenever the USB input is suspended, so during
+unplugged deep sleep the dog is never petted and eventually bites -> PMIC
+reset. Disable the charger watchdog timer (WDOG_TIMER_EN_ON_PLUGIN_BIT |
+BARK_WDOG_INT_EN_BIT in WD_CFG_REG) while the USB input is suspended and
+restore it on plugin/resume. Native deep sleep and charging protection while
+plugged are both preserved.
+
+Signed-off-by: enuma-fix <enuma@local>
+---
+diff --git a/drivers/power/supply/qcom/smb5-lib.c b/drivers/power/supply/qcom/smb5-lib.c
+index 1111111..2222222 100644
+--- a/drivers/power/supply/qcom/smb5-lib.c
++++ b/drivers/power/supply/qcom/smb5-lib.c
+@@ -775,6 +775,29 @@
+ 		smblib_err(chg, "Couldn't write %s to USBIN_SUSPEND_BIT rc=%d\n",
+ 			suspend ? "suspend" : "resume", rc);
+ 
++	/*
++	 * [PATCH] Unplug + deep-sleep watchdog fix (Xiaomi Pad 5 Pro / elish-enuma).
++	 *
++	 * The PM8150B bark watchdog is petted ONLY by wdog_bark_irq_handler(),
++	 * but the bark interrupt is suppressed at the PMIC level whenever the USB
++	 * input is suspended ("On USB suspend, WDOG IRQ stops triggering", see
++	 * smblib_handle_therm_regulation). On unplug the input is suspended, so the
++	 * AP never receives the bark interrupt and the dog is never petted; after
++	 * the bark+bite window the PMIC hard-resets the device (~64s after unplug
++	 * + screen-off). Disable the charger watchdog timer (and its bark
++	 * interrupt) while the USB input is suspended so it cannot bite during deep
++	 * sleep; restore it on plugin/resume. Charging protection while plugged is
++	 * unaffected because the input is then active and the bark keeps firing.
++	 */
++	{
++		int wd_rc = smblib_masked_write(chg, WD_CFG_REG,
++				WDOG_TIMER_EN_ON_PLUGIN_BIT | BARK_WDOG_INT_EN_BIT,
++				suspend ? 0 :
++				(WDOG_TIMER_EN_ON_PLUGIN_BIT | BARK_WDOG_INT_EN_BIT));
++		if (wd_rc < 0)
++			smblib_err(chg, "Couldn't %s charger watchdog rc=%d\n",
++				suspend ? "disable" : "enable", wd_rc);
++	}
+ 	if (!suspend)
+ 		vote(chg->icl_irq_disable_votable, USB_SUSPEND_VOTER,
+ 				false, 0);
