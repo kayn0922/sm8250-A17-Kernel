@@ -548,18 +548,33 @@ fi
 # because of runtime-PM accounting. Return 0 and let the PM core proceed.
 # ---------------------------------------------------------------------------
 if [ "${USG_SPIFIX:-0}" = "1" ]; then
-python3 - "$KDIR_ABS/drivers/spi/spi-geni-qcom.c" <<'PY'
+python3 - "$KDIR_ABS/drivers/spi/spi-geni-qcom.c" "${USG_FORCE_RPM:-0}" <<'PY'
 import sys
 p = sys.argv[1]
+force = len(sys.argv) > 2 and sys.argv[2] == '1'
 s = open(p, encoding='utf-8').read()
 old = "\t\tret = -EBUSY;\n\t\treturn ret;\n"
-new = ("\t\t/* spi-geni suspend fix (Xiaomi Pad 5 Pro, elish/enuma):\n"
+new_pass = ("\t\t/* spi-geni suspend fix (Xiaomi Pad 5 Pro, elish/enuma):\n"
        "\t\t * child NVT-ts touch panel issues SPI transfers during its\n"
        "\t\t * suspend/resume callbacks, so runtime PM can still be active\n"
        "\t\t * here. Vetoing system suspend with -EBUSY makes Android retry\n"
        "\t\t * forever until the watchdog resets the board. Upstream spi-geni\n"
        "\t\t * simply returns 0 from system suspend; do the same.\n"
        "\t\t */\n")
+# spifix3: merely dropping -EBUSY lets an ACTIVE QUPV3 serial engine reach
+# suspend_enter() -> the SoC hard-hangs in noirq/syscore and the watchdog
+# resets it (pstore empty, probe frozen at screen-off). Force the controller
+# down through its own runtime_suspend callback instead.
+new_force = ("\t\t/* spi-geni suspend fix (spifix3 force-rpm):\n"
+       "\t\t * runtime-active here means the QUPV3 SE still has clocks on.\n"
+       "\t\t * Power it down via its own runtime_suspend() before the PM\n"
+       "\t\t * core cuts the domain; paired with pm_runtime_force_resume()\n"
+       "\t\t * in spi_geni_resume(). Never veto system suspend.\n"
+       "\t\t */\n"
+       "\t\tif (pm_runtime_force_suspend(dev))\n"
+       "\t\t\tGENI_SE_ERR(geni_mas->ipc, true, dev,\n"
+       "\t\t\t\t\":%s: force runtime suspend failed\\n\", __func__);\n")
+new = new_force if force else new_pass
 if old not in s:
     if "spi-geni suspend fix" in s:
         print("[patch] SPIFIX already applied")
@@ -585,6 +600,47 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# FORCE_RPM (spifix3): power the GENI devices DOWN instead of merely waving
+# them through. spifix2 post-mortem (on-device probe frozen at screen-off,
+# pstore empty, fastboot after watchdog reset) proves that simply returning 0
+# leaves the QUPV3 serial engines runtime-active while the PM core cuts their
+# clocks, and the SoC never comes back from suspend_enter().
+# pm_runtime_force_suspend() bypasses the userspace usage count and calls the
+# driver's own runtime_suspend(); the paired force_resume() restores it early
+# on the way back. Both drivers already include <linux/pm_runtime.h>.
+# ---------------------------------------------------------------------------
+if [ "${USG_FORCE_RPM:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/spi/spi-geni-qcom.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = "static int spi_geni_resume(struct device *dev)\n{\n\treturn 0;\n}\n"
+new = ("static int spi_geni_resume(struct device *dev)\n"
+       "{\n"
+       "\t/* spifix3: restore the SE clocks forced off in spi_geni_suspend() */\n"
+       "\t(void)pm_runtime_force_resume(dev);\n"
+       "\treturn 0;\n"
+       "}\n")
+if 'spifix3: restore the SE clocks' in s:
+    print('[patch] FORCE_RPM spi resume already applied')
+else:
+    if s.count(old) < 1:
+        print('[FATAL] FORCE_RPM: spi_geni_resume() anchor not found'); sys.exit(1)
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('[patch] FORCE_RPM applied: spi_geni_resume() force-resumes runtime PM')
+PY
+    if grep -q "spifix3: restore the SE clocks" "$KDIR_ABS/drivers/spi/spi-geni-qcom.c"; then
+        echo "[patch] CONFIRMED: spifix3 spi force-resume ACTIVE"
+    else
+        echo "[FATAL] spifix3 spi force-resume NOT applied!"
+        exit 1
+    fi
+else
+    echo "[patch] FORCE_RPM not requested (spifix2 pass-through behaviour kept)"
+fi
+
+# ---------------------------------------------------------------------------
 # GENI_SERIAL_FIX: the NEXT -EBUSY veto on the same QUPV3 subsystem.
 # After the spi-geni fix, the pstore console of the reboot showed:
 #   PM: Device 998000.qcom,qup_uart failed to suspend noirq: error -16
@@ -594,17 +650,27 @@ fi
 # Same treatment as spi_geni_suspend(): drop the -EBUSY veto.
 # ---------------------------------------------------------------------------
 if [ "${USG_GENI_SERIAL_FIX:-0}" = "1" ]; then
-python3 - "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c" <<'PY'
+python3 - "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c" "${USG_FORCE_RPM:-0}" <<'PY'
 import sys
 p = sys.argv[1]
+force = len(sys.argv) > 2 and sys.argv[2] == '1'
 s = open(p, encoding='utf-8').read()
+dirty = False
 fn = 'static int msm_geni_serial_sys_suspend_noirq(struct device *dev)'
 old = "\t\t\tmutex_unlock(&tty_port->mutex);\n\t\t\treturn -EBUSY;\n"
-new = ("\t\t\t/* geni-serial suspend fix (Xiaomi Pad 5 Pro): a GENI UART\n"
+new_pass = ("\t\t\t/* geni-serial suspend fix (Xiaomi Pad 5 Pro): a GENI UART\n"
        "\t\t\t * kept open by userspace is runtime-active; vetoing system\n"
        "\t\t\t * suspend here aborts the whole sleep and watchdog-resets\n"
        "\t\t\t * the board. Let the PM core proceed (same as spi-geni).\n"
        "\t\t\t */\n")
+new_force = ("\t\t\t/* geni-serial suspend fix (spifix3 force-rpm):\n"
+       "\t\t\t * a userspace-held UART is still runtime-active here; power\n"
+       "\t\t\t * its QUPV3 SE down through the driver's runtime_suspend()\n"
+       "\t\t\t * instead of letting suspend_enter() cut live clocks.\n"
+       "\t\t\t */\n"
+       "\t\t\tif (pm_runtime_force_suspend(dev))\n"
+       "\t\t\t\tdev_err(dev, \"spifix3: force runtime suspend failed\\n\");\n")
+new = new_force if force else new_pass
 if 'geni-serial suspend fix' in s:
     print('[patch] GENI_SERIAL_FIX already applied')
 else:
@@ -619,14 +685,51 @@ else:
     if body.count(old) != 1:
         print('[FATAL] GENI_SERIAL_FIX: anchor count %d' % body.count(old)); sys.exit(1)
     s = s[:i] + body.replace(old, new, 1) + s[j:]
-    open(p, 'w', encoding='utf-8').write(s)
+    dirty = True
     print('[patch] GENI_SERIAL_FIX applied: sys_suspend_noirq no longer returns -EBUSY')
+
+if force and 'spifix3: restore UART resources' not in s:
+    fn2 = 'static int msm_geni_serial_sys_resume_noirq(struct device *dev)'
+    i2 = s.find(fn2)
+    if i2 < 0:
+        print('[FATAL] FORCE_RPM: sys_resume_noirq not found'); sys.exit(1)
+    j2 = s.find('\n}\n', i2)
+    if j2 < 0:
+        print('[FATAL] FORCE_RPM: resume function end not found'); sys.exit(1)
+    j2 += 3
+    body2 = s[i2:j2]
+    old2 = "\treturn 0;\n"
+    new2 = ("\t/* spifix3: restore UART resources forced down in suspend_noirq */\n"
+            "\t(void)pm_runtime_force_resume(dev);\n"
+            "\treturn 0;\n")
+    if body2.count(old2) != 1:
+        print('[FATAL] FORCE_RPM: resume anchor count %d' % body2.count(old2)); sys.exit(1)
+    s = s[:i2] + body2.replace(old2, new2, 1) + s[j2:]
+    dirty = True
+    print('[patch] FORCE_RPM applied: sys_resume_noirq force-resumes runtime PM')
+
+if dirty:
+    open(p, 'w', encoding='utf-8').write(s)
 PY
     if grep -q "geni-serial suspend fix" "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c"; then
         echo "[patch] CONFIRMED: geni-serial suspend fix ACTIVE"
     else
         echo "[FATAL] geni-serial suspend fix NOT applied!"
         exit 1
+    fi
+    if [ "${USG_FORCE_RPM:-0}" = "1" ]; then
+        if grep -q "spifix3: restore UART resources" "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c"; then
+            echo "[patch] CONFIRMED: spifix3 geni-serial force-resume ACTIVE"
+        else
+            echo "[FATAL] spifix3 geni-serial force-resume NOT applied!"
+            exit 1
+        fi
+        if grep -q "pm_runtime_force_suspend(dev)" "$KDIR_ABS/drivers/spi/spi-geni-qcom.c"; then
+            echo "[patch] CONFIRMED: spifix3 spi force-suspend ACTIVE"
+        else
+            echo "[FATAL] spifix3 spi force-suspend NOT applied!"
+            exit 1
+        fi
     fi
 else
     echo "[patch] GENI_SERIAL_FIX not requested (stock msm_geni_serial.c kept)"
