@@ -44,8 +44,12 @@ mkdir -p "$K/arch/arm64/boot/dts/vendor/xiaomi"
 cp -a "$B/arch/arm64/boot/dts/vendor/xiaomi/." "$K/arch/arm64/boot/dts/vendor/xiaomi/"
 rsync -a --ignore-existing \
   "$B/arch/arm64/boot/dts/vendor/qcom/" "$K/arch/arm64/boot/dts/vendor/qcom/"
-cp "$B/arch/arm64/boot/dts/vendor/Makefile" "$K/arch/arm64/boot/dts/vendor/Makefile"
-echo "[LOS] xiaomi dts files: $(find "$K/arch/arm64/boot/dts/vendor/xiaomi" -type f | wc -l)"
+# Never overwrite LOS build files - the donor Makefile is only a fallback.
+if [ -f "$B/arch/arm64/boot/dts/vendor/Makefile" ] && [ ! -f "$K/arch/arm64/boot/dts/vendor/Makefile" ]; then
+  cp "$B/arch/arm64/boot/dts/vendor/Makefile" "$K/arch/arm64/boot/dts/vendor/Makefile"
+fi
+# Xiaomi DTS entries are symlinks, so count both regular files and links.
+echo "[LOS] xiaomi dts entries: $(find "$K/arch/arm64/boot/dts/vendor/xiaomi" \( -type f -o -type l \) | wc -l)"
 
 # --- 2) Configuration ------------------------------------------------------
 # The donor defconfig is the exact one used by every previous (bootable)
@@ -80,6 +84,21 @@ case "$CONFIG_BASE" in
     make "${MAKE_ARGS[@]}" "${DEVICE}_defconfig"
     ;;
 esac
+
+# The donor defconfig relies on CONFIG_ZRAM=y to pull in CONFIG_ZSMALLOC.
+# The LOS Kconfig leaves ZSMALLOC=n when seeded from that defconfig, while
+# kernel/taskstats.c reads NR_ZSPAGES unconditionally (mmzone.h defines it
+# only under CONFIG_ZSMALLOC) -> "use of undeclared identifier 'NR_ZSPAGES'".
+# Force ZSMALLOC back on so the effective config matches the donor build;
+# this is a Kconfig-level alignment, not a source-tree modification.
+if [ -x "$K/scripts/config" ]; then
+  "$K/scripts/config" --file out/.config --enable ZSMALLOC
+else
+  sed -i 's/^# CONFIG_ZSMALLOC is not set/CONFIG_ZSMALLOC=y/' out/.config
+  grep -q '^CONFIG_ZSMALLOC=y' out/.config || echo 'CONFIG_ZSMALLOC=y' >> out/.config
+fi
+make "${MAKE_ARGS[@]}" olddefconfig
+echo "[LOS] ZSMALLOC forced: $(grep -E '^CONFIG_ZSMALLOC=' out/.config || echo missing)"
 
 echo "[LOS] effective config (root/suspend related):"
 grep -E '^CONFIG_(KSU|KPM|SUSFS|PM_SLEEP_DEBUG|ESOC|AIROHA_GPS|SERIAL_MSM_GENI|CHARGER_LN8000|QPNP_SMB5)=' out/.config || true
