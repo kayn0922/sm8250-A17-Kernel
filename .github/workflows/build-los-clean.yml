@@ -1,0 +1,108 @@
+name: Build LOS Clean Kernel (no KSU / no patches)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Hardware codename (enuma=5G / elish=WiFi)'
+        required: true
+        default: 'enuma'
+        type: choice
+        options: [enuma, elish]
+      los_ref:
+        description: 'LineageOS kernel branch (both are 4.19.325)'
+        required: true
+        default: 'lineage-23.2'
+        type: choice
+        options: [lineage-23.2, lineage-23.1, lineage-24.0]
+      config_base:
+        description: 'ymdzq_defconfig = exact config of previous bootable builds (only the source tree changes); official_ikcfg = stock OS4 boot.img embedded IKCFG'
+        required: true
+        default: 'ymdzq_defconfig'
+        type: choice
+        options: [ymdzq_defconfig, official_ikcfg]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: LOS clean / ${{ inputs.device }} / ${{ inputs.los_ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout this builder
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: Checkout LineageOS clean kernel tree
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_xiaomi_sm8250
+          ref: ${{ inputs.los_ref }}
+          fetch-depth: 1
+          path: kernel
+
+      - name: Checkout Xiaomi BSP donor (DTS + defconfig only)
+        uses: actions/checkout@v4
+        with:
+          repository: ymdzq/kernel_xiaomi_sm8250_mod
+          ref: android16-aptusitu
+          fetch-depth: 1
+          path: bsp
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl wget bison flex zip bc cpio \
+            libssl-dev rsync python-is-python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Setup ZyC-Clang 22
+        run: |
+          mkdir -p "$HOME/ZyC-clang" && cd "$HOME/ZyC-clang"
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/22.0.0git-20250924-release/Clang-22.0.0git-20250924.tar.gz
+          tar -zxf Clang-22.0.0git-20250924.tar.gz
+          "$HOME/ZyC-clang/bin/clang" --version | head -2
+
+      - name: Build clean LOS kernel
+        run: |
+          bash builder/scripts/build_los_clean.sh \
+            kernel bsp "${{ inputs.device }}" "${{ inputs.config_base }}"
+
+      - name: Collect flashable zip
+        run: |
+          mkdir -p artifacts
+          find kernel -maxdepth 1 -name 'Kernel_LOS_*.zip' -print -exec cp {} artifacts/ \;
+          ls -lh artifacts/
+          test -n "$(ls -A artifacts/)" || { echo 'No kernel zip produced'; exit 1; }
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-${{ github.run_id }}
+          name: LOS clean / ${{ inputs.device }} / ${{ inputs.los_ref }} / run ${{ github.run_id }}
+          body: |
+            Built from `LineageOS/android_kernel_xiaomi_sm8250@${{ inputs.los_ref }}`
+            (4.19.325, clean CAF/CIP tree). Xiaomi DTS + device defconfig borrowed
+            from `ymdzq/kernel_xiaomi_sm8250_mod@android16-aptusitu`; no LOS source
+            is overwritten.
+
+            - device: `${{ inputs.device }}`
+            - config: `${{ inputs.config_base }}`
+            - root: **none** (no KernelSU / SukiSU / KernelPatch / KPM)
+            - patches: 0001/0002/0003 all OFF, no wakelock guard
+            - AK3: `split_boot; flash_boot;` only, dtb/dtbo NOT flashed
+
+            This is a diagnostic build: it isolates the kernel source tree as the
+            only variable. Expect no root. If it survives unplug + screen-off,
+            the regression lives in the aptusitu tree and a stock KernelSU can be
+            added afterwards.
+          files: artifacts/*.zip
