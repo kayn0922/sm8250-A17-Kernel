@@ -584,4 +584,52 @@ else
     echo "[patch] SPIFIX not requested (stock spi-geni-qcom.c kept)"
 fi
 
+# ---------------------------------------------------------------------------
+# GENI_SERIAL_FIX: the NEXT -EBUSY veto on the same QUPV3 subsystem.
+# After the spi-geni fix, the pstore console of the reboot showed:
+#   PM: Device 998000.qcom,qup_uart failed to suspend noirq: error -16
+# 998000.qcom,qup_uart is qcom,msm-geni-serial-hs (the GPS / keyboard GENI
+# UART), runtime_status=active because userspace holds the port open. Its CAF
+# 4.19 sys_suspend_noirq() vetoes the WHOLE system suspend in that case.
+# Same treatment as spi_geni_suspend(): drop the -EBUSY veto.
+# ---------------------------------------------------------------------------
+if [ "${USG_GENI_SERIAL_FIX:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+fn = 'static int msm_geni_serial_sys_suspend_noirq(struct device *dev)'
+old = "\t\t\tmutex_unlock(&tty_port->mutex);\n\t\t\treturn -EBUSY;\n"
+new = ("\t\t\t/* geni-serial suspend fix (Xiaomi Pad 5 Pro): a GENI UART\n"
+       "\t\t\t * kept open by userspace is runtime-active; vetoing system\n"
+       "\t\t\t * suspend here aborts the whole sleep and watchdog-resets\n"
+       "\t\t\t * the board. Let the PM core proceed (same as spi-geni).\n"
+       "\t\t\t */\n")
+if 'geni-serial suspend fix' in s:
+    print('[patch] GENI_SERIAL_FIX already applied')
+else:
+    i = s.find(fn)
+    if i < 0:
+        print('[FATAL] GENI_SERIAL_FIX: sys_suspend_noirq not found'); sys.exit(1)
+    j = s.find('\n}\n', i)
+    if j < 0:
+        print('[FATAL] GENI_SERIAL_FIX: function end not found'); sys.exit(1)
+    j += 3
+    body = s[i:j]
+    if body.count(old) != 1:
+        print('[FATAL] GENI_SERIAL_FIX: anchor count %d' % body.count(old)); sys.exit(1)
+    s = s[:i] + body.replace(old, new, 1) + s[j:]
+    open(p, 'w', encoding='utf-8').write(s)
+    print('[patch] GENI_SERIAL_FIX applied: sys_suspend_noirq no longer returns -EBUSY')
+PY
+    if grep -q "geni-serial suspend fix" "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c"; then
+        echo "[patch] CONFIRMED: geni-serial suspend fix ACTIVE"
+    else
+        echo "[FATAL] geni-serial suspend fix NOT applied!"
+        exit 1
+    fi
+else
+    echo "[patch] GENI_SERIAL_FIX not requested (stock msm_geni_serial.c kept)"
+fi
+
 echo "[patch] done"
