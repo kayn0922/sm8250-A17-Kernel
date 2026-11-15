@@ -28,11 +28,11 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = root fixes ON (cgroup-freezer race fix 0003 + charger watchdog safe-off 0002), native sleep, daily driver; capture = all fixes OFF + debug ON (catch the unplug+sleep reboot live)'
+        description: 'stable = patches 0001/0002/0003 ON + guard OFF; clean = ALL three patches OFF + guard OFF (stock SSR/charger/freezer code, functional enuma config kept); capture = fixes OFF + debug ON'
         required: true
         default: 'stable'
         type: choice
-        options: [stable, capture]
+        options: [stable, clean, guard, capture]
 
 permissions:
   contents: write
@@ -82,7 +82,8 @@ jobs:
           # capture: guard OFF + debug ON + watchdog fix OFF -> the real bug
           #   still fires so it can be observed/captured by ramoops/netconsole.
           USG_CAPTURE: ${{ inputs.build_mode == 'capture' && '1' || '' }}
-          USG_DISABLE: ${{ inputs.build_mode == 'stable' && '1' || '' }}
+          USG_CLEAN: ${{ inputs.build_mode == 'clean' && '1' || '' }}
+          USG_DISABLE: ${{ (inputs.build_mode == 'stable' || inputs.build_mode == 'clean') && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 

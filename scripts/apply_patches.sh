@@ -204,7 +204,9 @@ fi
 # patch is required.
 # ---------------------------------------------------------------------------
 SSR_PATCH="$BUILDER_DIR/patches/0001-soc-qcom-subsystem_restart-decouple-esoc0.patch"
-if [ -f "$SSR_PATCH" ]; then
+if [ "${USG_CLEAN:-0}" = "1" ]; then
+    echo "[patch] CLEAN build: 0001 esoc0/SSR patch SKIPPED (stock subsystem_restart.c kept)"
+elif [ -f "$SSR_PATCH" ]; then
     if git apply --check "$SSR_PATCH" 2>/dev/null; then
         git apply "$SSR_PATCH" && echo "[patch] applied $SSR_PATCH"
     else
@@ -223,7 +225,9 @@ fi
 
 # SSR 补丁落地校验: 防止 git apply / patch 静默失败导致补丁没进内核
 # (上一次就因此漏修 —— 0001 没编进去, esoc0 仍每 ~13s 重启)
-if grep -q "decoupled esoc0 from SSR restart order" drivers/soc/qcom/subsystem_restart.c 2>/dev/null; then
+if [ "${USG_CLEAN:-0}" = "1" ]; then
+    echo "[patch] CLEAN build: 0001 intentionally absent (stock SSR code)"
+elif grep -q "decoupled esoc0 from SSR restart order" drivers/soc/qcom/subsystem_restart.c 2>/dev/null; then
     echo "[patch] CONFIRMED: esoc0 decouple block present in subsystem_restart.c (GPS-recover + WiFi-stable fix ACTIVE)"
 else
     echo "[FATAL] esoc0 decouple block NOT found in subsystem_restart.c - 0001 patch did NOT land!"
@@ -240,8 +244,8 @@ fi
 # build EXCEPT the capture build, which must keep the bug alive to observe it.
 # ---------------------------------------------------------------------------
 WDOG_PATCH="$BUILDER_DIR/patches/0002-smb5-unplug-watchdog-fix.patch"
-if [ "${USG_CAPTURE:-0}" = "1" ]; then
-    echo "[patch] capture build (USG_CAPTURE=1): watchdog fix SKIPPED (bug must stay observable)"
+if [ "${USG_CAPTURE:-0}" = "1" ] || [ "${USG_CLEAN:-0}" = "1" ]; then
+    echo "[patch] capture/clean build: 0002 charger-watchdog patch SKIPPED (stock smb5-lib.c kept)"
 elif [ -f "$WDOG_PATCH" ]; then
     if git apply --check "$WDOG_PATCH" 2>/dev/null; then
         git apply "$WDOG_PATCH" && echo "[patch] applied $WDOG_PATCH"
@@ -258,10 +262,10 @@ else
 fi
 
 # 看门狗修复落地校验 (防止 git apply / patch 静默失败)
-if [ "${USG_CAPTURE:-0}" != "1" ] && grep -q "deep-sleep watchdog fix (Xiaomi Pad 5 Pro" drivers/power/supply/qcom/smb5-lib.c 2>/dev/null; then
+if [ "${USG_CAPTURE:-0}" != "1" ] && [ "${USG_CLEAN:-0}" != "1" ] && grep -q "deep-sleep watchdog fix (Xiaomi Pad 5 Pro" drivers/power/supply/qcom/smb5-lib.c 2>/dev/null; then
     echo "[patch] CONFIRMED: unplug+sleep watchdog fix present in smb5-lib.c (root fix ACTIVE)"
-elif [ "${USG_CAPTURE:-0}" = "1" ]; then
-    echo "[patch] capture build: watchdog fix intentionally absent"
+elif [ "${USG_CAPTURE:-0}" = "1" ] || [ "${USG_CLEAN:-0}" = "1" ]; then
+    echo "[patch] capture/clean build: 0002 watchdog fix intentionally absent"
 else
     echo "[FATAL] unplug+sleep watchdog fix NOT found in smb5-lib.c - 0002 patch did NOT land!"
 fi
@@ -282,8 +286,8 @@ fi
 #  same 4.19.325-cip base; the buggy freezer.c was confirmed in our exact tree.)
 # ---------------------------------------------------------------------------
 CGROUP_PATCH="$BUILDER_DIR/patches/0003-cgroup-freezer-fix.patch"
-if [ "${USG_CAPTURE:-0}" = "1" ]; then
-    echo "[patch] capture build (USG_CAPTURE=1): cgroup freezer fix SKIPPED (bug must stay observable)"
+if [ "${USG_CAPTURE:-0}" = "1" ] || [ "${USG_CLEAN:-0}" = "1" ]; then
+    echo "[patch] capture/clean build: 0003 cgroup-freezer patch SKIPPED (stock freezer.c kept)"
 elif [ -f "$CGROUP_PATCH" ]; then
     if git apply --check "$CGROUP_PATCH" 2>/dev/null; then
         git apply "$CGROUP_PATCH" && echo "[patch] applied $CGROUP_PATCH"
@@ -300,10 +304,10 @@ else
 fi
 
 # cgroup freezer 修复落地校验 (防止 git apply / patch 静默失败)
-if [ "${USG_CAPTURE:-0}" != "1" ] && grep -q "set_thread_flag(TIF_SIGPENDING)" kernel/cgroup/freezer.c 2>/dev/null; then
+if [ "${USG_CAPTURE:-0}" != "1" ] && [ "${USG_CLEAN:-0}" != "1" ] && grep -q "set_thread_flag(TIF_SIGPENDING)" kernel/cgroup/freezer.c 2>/dev/null; then
     echo "[patch] CONFIRMED: cgroup freezer fix present in freezer.c (race fix ACTIVE)"
-elif [ "${USG_CAPTURE:-0}" = "1" ]; then
-    echo "[patch] capture build: cgroup freezer fix intentionally absent"
+elif [ "${USG_CAPTURE:-0}" = "1" ] || [ "${USG_CLEAN:-0}" = "1" ]; then
+    echo "[patch] capture/clean build: 0003 cgroup freezer fix intentionally absent"
 else
     echo "[FATAL] cgroup freezer fix NOT found in freezer.c - 0003 patch did NOT land!"
 fi
@@ -388,7 +392,7 @@ PY
 # charger / PD / fuel-gauge driver, so charging and other features are untouched.
 # ---------------------------------------------------------------------------
 USG_C="$BUILDER_DIR/patches/unplug_suspend_guard.c"
-if [ "${USG_CAPTURE:-0}" = "1" ]; then
+if [ "${USG_CAPTURE:-0}" = "1" ] || [ "${USG_CLEAN:-0}" = "1" ]; then
     # Diagnostic/capture build: the guard MUST NOT be compiled in. It holds a
     # suspend wakelock while USB is unplugged, which is exactly what keeps the
     # genuine unplug+deep-sleep panic from happening (so there would be
