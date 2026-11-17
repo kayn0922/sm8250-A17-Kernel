@@ -787,8 +787,9 @@ cands = [
     'drivers/platform/xiaomi/xiaomi_keyboard.c',
     'drivers/input/keyboard/xiaomi_keyboard.c',
 ]
+sig = 'static int xiaomi_keyboard_probe(struct platform_device *pdev)'
 anchor = '\tint ret = 0;\n\tMI_KB_INFO("enter\\n");\n'
-inject = anchor + (
+inject = (
     '\n\t/* USG_NOKBD2: pogo keyboard not present. Its IRQ handler calls\n'
     '\t * pm_wakeup_event(dev, 500) on every floating-pin interrupt, which\n'
     '\t * keeps a PM wakeup event permanently armed and makes every system\n'
@@ -806,13 +807,18 @@ for rel in cands:
         print('[patch] USG_NOKBD2 already applied in %s' % rel)
         patched.append(rel)
         continue
-    n = s.count(anchor)
-    if n != 1:
-        print('[patch] NOKBD2: %s anchor count %d, skipped' % (rel, n))
+    if s.count(sig) != 1:
+        print('[patch] NOKBD2: %s probe signature count %d, skipped' % (rel, s.count(sig)))
         continue
-    s = s.replace(anchor, inject, 1)
+    i = s.find(sig)
+    j = s.find(anchor, i)
+    if j < 0:
+        print('[patch] NOKBD2: %s probe body anchor not found after signature' % rel)
+        continue
+    k = j + len(anchor)
+    s = s[:k] + inject + s[k:]
     open(p, 'w', encoding='utf-8').write(s)
-    print('[patch] USG_NOKBD2 applied in %s' % rel)
+    print('[patch] USG_NOKBD2 applied in %s (probe -> -ENODEV)' % rel)
     patched.append(rel)
 if not patched:
     print('[FATAL] NOKBD2: no xiaomi_keyboard.c matched any known path')
