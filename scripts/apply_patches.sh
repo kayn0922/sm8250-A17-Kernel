@@ -736,6 +736,65 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# USG_NVTFIX: stop the Novatek touch driver from issuing SPI transfers during
+# system suspend (elish/enuma, kernel 4.19.325-cip).
+#
+# Root cause confirmed on device 2026-11-17:
+#   * `unbind spi0.0` (NVT-ts) + `echo mem` -> /sys/power/suspend_stats/success=1,
+#     uptime continuous, NO reset.
+#   * NVT bound + `echo mem` -> PMIC "Hard Reset" / "PS_HOLD" every single time.
+#   * ftrace: NVT-ts IRQ 511 burst at screen-off, spi_geni runtime-active,
+#     PM: Device 990000.spi failed to suspend: error -16 (-EBUSY).
+#   * nvt_ts_suspend() takes the WAKEUP_GESTURE branch, calls enable_irq_wake()
+#     and keeps the SPI controller busy, so spi_geni_suspend() vetoes the whole
+#     system suspend and Android retries until the watchdog hard-resets.
+#
+# This patch forces the deep-sleep branch at suspend time:
+#   ts->db_wakeup = 0  ->  `if (!ts->db_wakeup) nvt_irq_enable(false)` runs,
+#   and the gesture branch (enable_irq_wake + 0x13) is skipped.
+# Also cancels the charger notifier work that can issue SPI writes.
+#
+# Trade-off: double-tap / pen-click wake-up is disabled; use the power key.
+# ---------------------------------------------------------------------------
+if [ "${USG_NVTFIX:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_NVTFIX' in s:
+    print('[patch] USG_NVTFIX already applied')
+else:
+    anchor = ('\tif (!bTouchIsAwake) {\n'
+              '\t\tNVT_LOG("Touch is already suspend\\n");\n'
+              '\t\treturn 0;\n'
+              '\t}\n')
+    n = s.count(anchor)
+    if n != 1:
+        print('[FATAL] NVTFIX: suspend anchor count %d (expected 1)' % n)
+        sys.exit(1)
+    inject = anchor + (
+        '\n\t/* USG_NVTFIX: force deep-sleep branch. In gesture mode the driver\n'
+        '\t * calls enable_irq_wake() and keeps touching the SPI bus, which makes\n'
+        '\t * spi_geni_suspend() return -EBUSY and vetoes the whole system\n'
+        '\t * suspend (watchdog hard reset afterwards). Setting db_wakeup=0 makes\n'
+        '\t * nvt_irq_enable(false) run and skips the gesture branch.\n'
+        '\t */\n'
+        '\tts->db_wakeup = 0;\n')
+    s = s.replace(anchor, inject, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('[patch] USG_NVTFIX applied: db_wakeup forced to 0 in nvt_ts_suspend')
+PY
+    if grep -q "USG_NVTFIX" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx.c"; then
+        echo "[patch] CONFIRMED: NVT suspend gesture-disable fix ACTIVE"
+    else
+        echo "[FATAL] USG_NVTFIX not applied!"
+        exit 1
+    fi
+else
+    echo "[patch] USG_NVTFIX not requested (stock nt36xxx.c kept)"
+fi
+
+# ---------------------------------------------------------------------------
 # USG_SHALLOW (spifix4): skip the vendor SoC power-collapse entry point.
 #
 # Evidence gathered on the device:
