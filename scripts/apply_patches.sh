@@ -182,6 +182,20 @@ if os.environ.get('USG_CAPTURE') == '1':
     })
 elif os.environ.get('USG_DISABLE') != '1':
     want['CONFIG_UNPLUG_SUSPEND_GUARD'] = 'y'
+
+# USG_NOKBD: disable the Xiaomi pogo keyboard driver.
+# On-device evidence (2026-11-17): with no keyboard attached, the driver still
+# fires "xiaomi_keyboard_irq_func: keyboard event: wakeup system" roughly every
+# 300ms (IRQ 548 / MiKB-IRQ, gpio 83). During system suspend this raises a
+# PM wakeup event, so dpm_suspend aborts with
+#   "PM: Some devices failed to suspend, or early wake event detected"
+# and Android retries until the watchdog resets the board.
+# The user does not use the pogo keyboard, so removing the driver is the
+# cleanest fix.
+if os.environ.get('USG_NOKBD') == '1':
+    want['CONFIG_XIAOMI_KEYBOARD'] = 'n'
+    print('[patch] NOKBD: CONFIG_XIAOMI_KEYBOARD=n (pogo keyboard driver disabled)')
+
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
 keys = set(want)
