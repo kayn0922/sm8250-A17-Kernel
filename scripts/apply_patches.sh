@@ -750,6 +750,86 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# USG_NOKBD2: kill the Xiaomi pogo keyboard driver at the source.
+#
+# Why the config approach failed (2026-11-17):
+#   `CONFIG_XIAOMI_KEYBOARD=n` in the defconfig does NOT stick: the symbol is
+#   force-selected by another Kconfig entry, so olddefconfig restores =y and the
+#   driver still probes ("[xiaomi-keyboard] xiaomi_keyboard_probe 504: enter").
+#
+# Real evidence from the driver source:
+#   static irqreturn_t xiaomi_keyboard_irq_func(...)
+#   {
+#           MI_KB_INFO("keyboard event: wakeup system\n");
+#           pm_wakeup_event(&mdata->pdev->dev, 500);   <-- 500 ms wakeup event
+#   }
+#   and xiaomi_keyboard_pm_suspend() calls enable_irq_wake(mdata->irq).
+#
+# With no keyboard attached the pogo pins float, the IRQ fires roughly every
+# 300 ms, each firing re-arms a 500 ms wakeup event, so the event never expires
+# and pm_wakeup_pending() is always true.  dpm_suspend() then aborts with
+#   "PM: Some devices failed to suspend, or early wake event detected" (-EBUSY)
+# Android retries forever and the watchdog hard-resets the board.
+#
+# Fix: make xiaomi_keyboard_probe() return -ENODEV immediately, so no IRQ is
+# requested and no wakeup source is registered.  The user does not use the
+# keyboard, so nothing is lost.
+# ---------------------------------------------------------------------------
+if [ "${USG_NOKBD2:-0}" = "1" ]; then
+python3 - "$KDIR_ABS" <<'PY'
+import sys, os
+root = sys.argv[1]
+cands = [
+    'drivers/input/misc/xiaomi_keyboard/xiaomi_keyboard.c',
+    'drivers/input/misc/xiaomi_keyboard.c',
+    'drivers/misc/xiaomi_keyboard/xiaomi_keyboard.c',
+    'drivers/misc/xiaomi_keyboard.c',
+    'drivers/platform/xiaomi/xiaomi_keyboard.c',
+    'drivers/input/keyboard/xiaomi_keyboard.c',
+]
+anchor = '\tint ret = 0;\n\tMI_KB_INFO("enter\\n");\n'
+inject = anchor + (
+    '\n\t/* USG_NOKBD2: pogo keyboard not present. Its IRQ handler calls\n'
+    '\t * pm_wakeup_event(dev, 500) on every floating-pin interrupt, which\n'
+    '\t * keeps a PM wakeup event permanently armed and makes every system\n'
+    '\t * suspend abort with -EBUSY (then the watchdog hard-resets).\n'
+    '\t * Refuse to probe so no IRQ / wakeup source is ever registered.\n'
+    '\t */\n'
+    '\treturn -ENODEV;\n')
+patched = []
+for rel in cands:
+    p = os.path.join(root, rel)
+    if not os.path.exists(p):
+        continue
+    s = open(p, encoding='utf-8').read()
+    if 'USG_NOKBD2' in s:
+        print('[patch] USG_NOKBD2 already applied in %s' % rel)
+        patched.append(rel)
+        continue
+    n = s.count(anchor)
+    if n != 1:
+        print('[patch] NOKBD2: %s anchor count %d, skipped' % (rel, n))
+        continue
+    s = s.replace(anchor, inject, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('[patch] USG_NOKBD2 applied in %s' % rel)
+    patched.append(rel)
+if not patched:
+    print('[FATAL] NOKBD2: no xiaomi_keyboard.c matched any known path')
+    sys.exit(1)
+print('[patch] NOKBD2: patched %d file(s)' % len(patched))
+PY
+    if grep -rqs "USG_NOKBD2" "$KDIR_ABS/drivers/input/misc/" "$KDIR_ABS/drivers/misc/" "$KDIR_ABS/drivers/platform/"; then
+        echo "[patch] CONFIRMED: pogo keyboard driver disabled at probe (NOKBD2) ACTIVE"
+    else
+        echo "[FATAL] USG_NOKBD2 not applied!"
+        exit 1
+    fi
+else
+    echo "[patch] USG_NOKBD2 not requested (stock xiaomi_keyboard.c kept)"
+fi
+
+# ---------------------------------------------------------------------------
 # USG_NVTFIX: stop the Novatek touch driver from issuing SPI transfers during
 # system suspend (elish/enuma, kernel 4.19.325-cip).
 #
