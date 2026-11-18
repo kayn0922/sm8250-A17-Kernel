@@ -1385,4 +1385,74 @@ else
     echo "[patch] USG_UFSQOS not requested"
 fi
 
+# ---------------------------------------------------------------------------
+# USG_NOSYNC: skip ksys_sync() at system-suspend entry.
+#
+# Evidence (device 2026-11-18 21:54, nvtfix10 kernel, one single boot):
+#   suspend #1 (right after screen-off, `echo mem` from shell):
+#       PM: Syncing filesystems ... done.   -> ok
+#       USG_SHALLOW: WFI loop entered / wakeup pending, leaving WFI loop
+#       PM: suspend exit                    -> clean
+#   suspend #2 (9.5s later, initiated from Android via binder):
+#       suspend_enter[3] begin -> sync_filesystems[0] begin -> (no end)
+#       workqueue storm: ufs_qcom_pm_qos_vote_work/unvote_work,
+#                        cfq_kick_queue, blk_delay_work, memlat_monitor_work
+#       -> device powered off (PMIC PS_HOLD path)
+# Same kernel, same screen-off state, same suspend target: the only difference
+# is the amount of dirty writeback queued by the apps that resumed in between.
+# So the trigger is the size of the sync I/O, not who asked for the suspend.
+#
+# Skipping the sync removes the storm window entirely. Android's own layers
+# already fsync what matters on screen-off and f2fs/ext4 keep their journals,
+# so the risk is limited to losing the most recent unsynced writes if the
+# device is hard-reset while asleep.
+#
+# Runtime control: /sys/module/suspend/parameters/usg_suspend_sync (1 = stock).
+# ---------------------------------------------------------------------------
+if [ "${USG_NOKBD2:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/kernel/power/suspend.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_NOSYNC' in s:
+    print('[patch] USG_NOSYNC already applied'); sys.exit(0)
+
+anchor = 'suspend_state_t mem_sleep_current = PM_SUSPEND_TO_IDLE;\n'
+decl = ('suspend_state_t mem_sleep_current = PM_SUSPEND_TO_IDLE;\n'
+        '\n'
+        '/* USG_NOSYNC: ksys_sync() at suspend entry flushes every dirty page at\n'
+        ' * once; on this platform that writeback storm keeps the UFS and the\n'
+        ' * block layer busy long enough to deadlock the RPMH power handshake and\n'
+        ' * the PMIC ends up asserting PS_HOLD (hard power off / reset). Skip it by\n'
+        ' * default; 1 restores the stock behaviour.\n'
+        ' */\n'
+        'static bool usg_suspend_sync;\n'
+        'module_param(usg_suspend_sync, bool, 0644);\n'
+        'MODULE_PARM_DESC(usg_suspend_sync,\n'
+        '        "sync filesystems at suspend entry (1=stock, 0=skip)");\n')
+if s.count(anchor) != 1:
+    print('[FATAL] NOSYNC: anchor count %d' % s.count(anchor)); sys.exit(1)
+s = s.replace(anchor, decl, 1)
+
+call = '\tksys_sync();\n'
+guarded = ('\tif (usg_suspend_sync)\n'
+           '\t\tksys_sync();\n'
+           '\telse\n'
+           '\t\tpr_info("USG_NOSYNC: ksys_sync skipped at suspend entry\\n");\n')
+if s.count(call) != 1:
+    print('[FATAL] NOSYNC: ksys_sync anchor count %d' % s.count(call)); sys.exit(1)
+s = s.replace(call, guarded, 1)
+
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_NOSYNC applied: ksys_sync skipped at suspend entry')
+PY
+    if grep -q "USG_NOSYNC" "$KDIR_ABS/kernel/power/suspend.c" 2>/dev/null; then
+        echo "[patch] CONFIRMED: USG_NOSYNC active (no ksys_sync at suspend -> no writeback storm)"
+    else
+        echo "[WARN] USG_NOSYNC not applied"
+    fi
+else
+    echo "[patch] USG_NOSYNC not requested"
+fi
+
 echo "[patch] done"
