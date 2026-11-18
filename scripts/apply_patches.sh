@@ -1055,7 +1055,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# USG_SKIPFWUPD: eliminate the ~15s dead-touch window after every rebind.
+# USG_SKIPFWUPD v2: eliminate the ~15s dead-touch window after every rebind.
 #
 # Root cause (confirmed on device 2026-11-18 via dmesg + user timing):
 #   nvt_ts_probe() queues Boot_Update_Firmware() with a 15000ms delay:
@@ -1065,11 +1065,18 @@ fi
 #   (fw_ver=0x1A). During the reflash/bootloader handshake the IC does not
 #   report touches -> ~16s of "screen on but no touch" after each power-on.
 #
-# Fix:
-#   In Boot_Update_Firmware(), if the IC already reports a non-zero fw_ver
-#   (i.e. valid firmware loaded by probe), skip the reflash. Only fall back
-#   to the original upgrade path when fw_ver==0 (blank/corrupt IC), so a
-#   genuinely broken panel can still recover.
+# Why v1 failed (dmesg 2026-11-18): v1 guarded on `ts->fw_ver`, but inside
+#   Boot_Update_Firmware() the nvt_get_fw_info() call (which fills fw_ver) is
+#   AFTER nvt_update_firmware(), so fw_ver is still 0 when the guard runs ->
+#   the "skip when fw_ver!=0" branch never fired.
+#
+# Fix v2:
+#   Add a runtime-switchable module_param `nvt_skip_boot_fwupdate`, default=1
+#   (skip). Boot_Update_Firmware() returns immediately when it is set, so no
+#   reflash / no 15s dead-touch. To restore stock behaviour at runtime without
+#   reflashing the kernel:
+#       echo 0 > /sys/module/*/parameters/nvt_skip_boot_fwupdate
+#   (then trigger a rebind; set back to 1 to skip again).
 # ---------------------------------------------------------------------------
 if [ "${USG_SKIPFWUPD:-0}" = "1" ]; then
 python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c" <<'PY'
@@ -1080,31 +1087,64 @@ if 'USG_SKIPFWUPD' in s:
     print('[patch] USG_SKIPFWUPD already applied to fw_update')
     sys.exit(0)
 
-anchor = ('void Boot_Update_Firmware(struct work_struct *work)\n'
-          '{\n'
-          '\tnvt_match_fw();\n')
-add = ('void Boot_Update_Firmware(struct work_struct *work)\n'
-       '{\n'
-       '\t/* USG_SKIPFWUPD: probe already loaded valid firmware (fw_ver!=0).\n'
-       '\t * The stock 15s delayed reflash of the same FW makes touch dead\n'
-       '\t * for ~15s after every unbind/rebind. Skip it when FW is healthy;\n'
-       '\t * still upgrade when fw_ver==0 (blank/corrupt IC) for safety. */\n'
-       '\tif (ts && ts->fw_ver) {\n'
-       '\t\tNVT_LOG("fw_ver=0x%02X valid, skip boot firmware update\\n", ts->fw_ver);\n'
-       '\t\treturn;\n'
-       '\t}\n'
-       '\tnvt_match_fw();\n')
-n = s.count(anchor)
-if n != 1:
-    print('[FATAL] SKIPFWUPD Boot_Update_Firmware anchor count %d (expected 1)' % n); sys.exit(1)
-s = s.replace(anchor, add, 1)
+# (a) ensure module.h is included (module_param needs it in this TU)
+a0 = ('#include <linux/firmware.h>\n'
+      '#include <linux/gpio.h>\n')
+b0 = ('#include <linux/firmware.h>\n'
+      '#include <linux/gpio.h>\n'
+      '#include <linux/module.h>  /* USG_SKIPFWUPD v2: module_param */\n')
+n0 = s.count(a0)
+if n0 != 1:
+    print('[FATAL] SKIPFWUPD include anchor count %d (expected 1)' % n0); sys.exit(1)
+s = s.replace(a0, b0, 1)
+
+# (b) add runtime-switchable module parameter right after #if BOOT_UPDATE_FIRMWARE
+a1 = ('#if BOOT_UPDATE_FIRMWARE\n'
+      '\n'
+      '#define SIZE_4KB 4096\n')
+b1 = ('#if BOOT_UPDATE_FIRMWARE\n'
+      '\n'
+      '/* USG_SKIPFWUPD v2: runtime-switchable skip of the 15s delayed boot\n'
+      ' * firmware reflash. 1=skip (default, removes ~16s dead-touch after every\n'
+      ' * unbind/rebind); 0=allow stock reflash. Change at runtime via\n'
+      ' * /sys/module/*/parameters/nvt_skip_boot_fwupdate (no kernel reflash). */\n'
+      'static int nvt_skip_boot_fwupdate = 1;\n'
+      'module_param(nvt_skip_boot_fwupdate, int, 0644);\n'
+      'MODULE_PARM_DESC(nvt_skip_boot_fwupdate,\n'
+      '    "Skip 15s boot firmware reflash (1=skip/default, 0=allow)");\n'
+      '\n'
+      '#define SIZE_4KB 4096\n')
+n1 = s.count(a1)
+if n1 != 1:
+    print('[FATAL] SKIPFWUPD param anchor count %d (expected 1)' % n1); sys.exit(1)
+s = s.replace(a1, b1, 1)
+
+# (b) skip at top of Boot_Update_Firmware
+a2 = ('void Boot_Update_Firmware(struct work_struct *work)\n'
+      '{\n'
+      '\tnvt_match_fw();\n')
+b2 = ('void Boot_Update_Firmware(struct work_struct *work)\n'
+      '{\n'
+      '\t/* USG_SKIPFWUPD v2: default skip the redundant 15s reflash of the\n'
+      '\t * same firmware that makes touch dead for ~16s after every rebind.\n'
+      '\t * Set nvt_skip_boot_fwupdate=0 at runtime to restore stock path. */\n'
+      '\tif (nvt_skip_boot_fwupdate) {\n'
+      '\t\tNVT_LOG("USG_SKIPFWUPD: skip boot firmware update (param=%d)\\n",\n'
+      '\t\t\tnvt_skip_boot_fwupdate);\n'
+      '\t\treturn;\n'
+      '\t}\n'
+      '\tnvt_match_fw();\n')
+n2 = s.count(a2)
+if n2 != 1:
+    print('[FATAL] SKIPFWUPD Boot_Update_Firmware anchor count %d (expected 1)' % n2); sys.exit(1)
+s = s.replace(a2, b2, 1)
 open(p, 'w', encoding='utf-8').write(s)
-print('[patch] USG_SKIPFWUPD applied to nt36xxx_fw_update.c: skip redundant reflash when fw healthy')
+print('[patch] USG_SKIPFWUPD v2 applied: module_param skip (default=1) + early return')
 PY
-    if grep -q "USG_SKIPFWUPD" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c"; then
-        echo "[patch] CONFIRMED: USG_SKIPFWUPD active (Boot_Update_Firmware skips reflash when fw_ver!=0)"
+    if grep -q "nvt_skip_boot_fwupdate" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c" && grep -q "USG_SKIPFWUPD v2" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c"; then
+        echo "[patch] CONFIRMED: USG_SKIPFWUPD v2 active (module_param default=skip, runtime reversible)"
     else
-        echo "[FATAL] USG_SKIPFWUPD failed to apply!"; exit 1
+        echo "[FATAL] USG_SKIPFWUPD v2 failed to apply!"; exit 1
     fi
 else
     echo "[patch] USG_SKIPFWUPD not requested (stock boot firmware update kept)"
