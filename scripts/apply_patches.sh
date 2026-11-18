@@ -1200,4 +1200,52 @@ else
     echo "[patch] USG_SKIPFWUPD not requested (stock boot firmware update kept)"
 fi
 
+# ---------------------------------------------------------------------------
+# KBDNOWAKE: the pogo-pin keyboard IRQ (msmgpio 19, name hs_uart_wakeup) is
+# re-registered as a system wakeup source on EVERY suspend by
+# xiaomi_keyboard_pm_suspend(): enable_irq_wake(mdata->irq). With no keyboard
+# attached the connector picks up noise and fires that IRQ every ~0.5s, so
+# suspend dies within half a second:
+#   pm_system_irq_wakeup: 398 triggered hs_uart_wakeup
+#   Wakeup pending. Abort CPU freeze
+#   Abort: Disabling non-boot cpus failed
+# (device evidence 2026-11-18 18:31, nvtfix5 kernel, suspend_stats success
+#  never advances past this point). Userspace cannot fix it: writing
+# "disabled" to /sys/kernel/irq/398/wakeup is undone by the next suspend.
+# Fix = keep the keyboard driver fully functional but stop it from claiming
+# wakeup capability; the power key stays the wake source.
+# ---------------------------------------------------------------------------
+if [ "${USG_NOKBD2:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/input/misc/xiaomi_keyboard/xiaomi_keyboard.c" <<'PY'
+import sys, os
+p = sys.argv[1]
+if not os.path.exists(p):
+    print('[WARN] KBDNOWAKE: %s not found, skipped' % p); sys.exit(0)
+s = open(p, encoding='utf-8').read()
+if 'USG_KBDNOWAKE' in s:
+    print('[patch] USG_KBDNOWAKE already applied'); sys.exit(0)
+a = '\tenable_irq_wake(mdata->irq);\n\tmdata->dev_pm_suspend = true;\n'
+b = ('\t/* USG_KBDNOWAKE: never register the pogo connector IRQ as a wakeup\n'
+     '\t * source. When no keyboard is attached the connector floods this IRQ\n'
+     '\t * and every suspend is aborted with "Wakeup pending. Abort CPU\n'
+     '\t * freeze". The keyboard itself keeps working; only its ability to\n'
+     '\t * wake the device from suspend is dropped. */\n'
+     '\t/* enable_irq_wake(mdata->irq); */\n'
+     '\tmdata->dev_pm_suspend = true;\n')
+n = s.count(a)
+if n != 1:
+    print('[FATAL] KBDNOWAKE anchor count %d (expected 1)' % n); sys.exit(1)
+s = s.replace(a, b, 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_KBDNOWAKE applied: keyboard IRQ is no longer a wakeup source')
+PY
+    if grep -q "USG_KBDNOWAKE" "$KDIR_ABS/drivers/input/misc/xiaomi_keyboard/xiaomi_keyboard.c" 2>/dev/null; then
+        echo "[patch] CONFIRMED: USG_KBDNOWAKE active (keyboard not a wakeup source, power key still wakes)"
+    else
+        echo "[WARN] USG_KBDNOWAKE not applied (source file missing?)"
+    fi
+else
+    echo "[patch] USG_KBDNOWAKE not requested"
+fi
+
 echo "[patch] done"
