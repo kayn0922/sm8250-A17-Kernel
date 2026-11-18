@@ -100,7 +100,7 @@ jobs:
           USG_KEEP_0001: ${{ (inputs.build_mode == 'spifix1' || inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4' || inputs.build_mode == 'nvtfix' || (inputs.build_mode == 'nvtfix2' || (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5'))) && '1' || '' }}
           USG_GENI_SERIAL_FIX: ${{ (inputs.build_mode == 'spifix2' || inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4' || (inputs.build_mode == 'nvtfix2' || (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5'))) && '1' || '' }}
           USG_FORCE_RPM: ${{ (inputs.build_mode == 'spifix3' || inputs.build_mode == 'spifix4' || inputs.build_mode == 'nvtfix' || (inputs.build_mode == 'nvtfix2' || (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5'))) && '1' || '' }}
-          USG_SHALLOW: ${{ inputs.build_mode == 'spifix4' && '1' || '' }}
+          USG_SHALLOW: ${{ (inputs.build_mode == 'spifix4' || inputs.build_mode == 'nvtfix5') && '1' || '' }}
           USG_NVTFIX: ${{ (inputs.build_mode == 'nvtfix' || (inputs.build_mode == 'nvtfix2' || (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5'))) && '1' || '' }}
           USG_NOKBD: ${{ (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5') && '1' || '' }}
           USG_NOKBD2: ${{ (inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5') && '1' || '' }}
