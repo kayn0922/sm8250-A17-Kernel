@@ -1236,8 +1236,23 @@ n = s.count(a)
 if n != 1:
     print('[FATAL] KBDNOWAKE anchor count %d (expected 1)' % n); sys.exit(1)
 s = s.replace(a, b, 1)
+# (b) refuse to bind when no keyboard is attached: the connector IRQ fires
+#     continuously and every hit calls pm_wakeup_event(), which aborts the
+#     CPU freeze during system suspend.
+a2 = 'static int xiaomi_keyboard_probe(struct platform_device *pdev)\n{\n'
+b2 = ('static int xiaomi_keyboard_probe(struct platform_device *pdev)\n'
+      '{\n'
+      '\t/* USG_KBDNOWAKE: with no keyboard attached the pogo connector floods\n'
+      '\t * its IRQ with noise and every hit calls pm_wakeup_event(), which\n'
+      '\t * aborts system suspend ("Wakeup pending. Abort CPU freeze").\n'
+      '\t * Refuse to bind. */\n'
+      '\treturn -ENODEV;\n')
+n2 = s.count(a2)
+if n2 != 1:
+    print('[FATAL] KBDNOWAKE probe anchor count %d (expected 1)' % n2); sys.exit(1)
+s = s.replace(a2, b2, 1)
 open(p, 'w', encoding='utf-8').write(s)
-print('[patch] USG_KBDNOWAKE applied: keyboard IRQ is no longer a wakeup source')
+print('[patch] USG_KBDNOWAKE applied: keyboard driver does not bind + no irq wakeup')
 PY
     if grep -q "USG_KBDNOWAKE" "$KDIR_ABS/drivers/input/misc/xiaomi_keyboard/xiaomi_keyboard.c" 2>/dev/null; then
         echo "[patch] CONFIRMED: USG_KBDNOWAKE active (keyboard not a wakeup source, power key still wakes)"
@@ -1246,6 +1261,54 @@ PY
     fi
 else
     echo "[patch] USG_KBDNOWAKE not requested"
+fi
+
+# ---------------------------------------------------------------------------
+# UARTNOWAKE: the real owner of IRQ 398 "hs_uart_wakeup" is the GENI serial
+# driver, not the keyboard driver. msm_geni_serial.c takes the UART RX pin as
+# an in-band wakeup IRQ and registers it as a system wakeup source:
+#     request_irq(..., "hs_uart_wakeup", uport);
+#     ret = irq_set_irq_wake(msm_port->wakeup_irq, 1);
+# That pin belongs to the keyboard/BT UART. With no keyboard attached it
+# floats and fires every ~0.5s, and because it is a wakeup IRQ every system
+# suspend dies with (device evidence 2026-11-18 19:15):
+#     pm_system_irq_wakeup: 398 triggered hs_uart_wakeup
+#     Wakeup pending. Abort CPU freeze
+#     Abort: Disabling non-boot cpus failed
+# Fix = keep the IRQ for data but never register it as a wakeup source; the
+# power key stays the wake source.
+# ---------------------------------------------------------------------------
+if [ "${USG_NOKBD2:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c" <<'PY'
+import sys, os
+p = sys.argv[1]
+if not os.path.exists(p):
+    print('[WARN] UARTNOWAKE: %s not found, skipped' % p); sys.exit(0)
+s = open(p, encoding='utf-8').read()
+if 'USG_UARTNOWAKE' in s:
+    print('[patch] USG_UARTNOWAKE already applied'); sys.exit(0)
+a = '\t\tret = irq_set_irq_wake(msm_port->wakeup_irq, 1);\n'
+b = ('\t\t/* USG_UARTNOWAKE: the in-band wakeup IRQ of this UART is the RX\n'
+     '\t\t * pin of the keyboard/BT UART. With no keyboard attached it floats\n'
+     '\t\t * and fires every ~0.5s, and being a wakeup IRQ it aborts every\n'
+     '\t\t * system suspend ("Wakeup pending. Abort CPU freeze"). Keep the\n'
+     '\t\t * IRQ for data, but never register it as a wakeup source; the\n'
+     '\t\t * power key stays the wake source. */\n'
+     '\t\tret = 0;\n')
+n = s.count(a)
+if n != 1:
+    print('[FATAL] UARTNOWAKE anchor count %d (expected 1)' % n); sys.exit(1)
+s = s.replace(a, b, 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_UARTNOWAKE applied: geni-serial wakeup IRQ is not a wakeup source')
+PY
+    if grep -q "USG_UARTNOWAKE" "$KDIR_ABS/drivers/tty/serial/msm_geni_serial.c" 2>/dev/null; then
+        echo "[patch] CONFIRMED: USG_UARTNOWAKE active (hs_uart_wakeup IRQ no longer wakes the system)"
+    else
+        echo "[WARN] UARTNOWAKE not applied (source file missing?)"
+    fi
+else
+    echo "[patch] USG_UARTNOWAKE not requested"
 fi
 
 echo "[patch] done"
