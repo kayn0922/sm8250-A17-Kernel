@@ -1373,6 +1373,33 @@ if s.count(a2) != 1:
     print('[FATAL] UFSQOS: unvote guard anchor count %d' % s.count(a2)); sys.exit(1)
 s = s.replace(a2, b2, 1)
 
+# The work bodies above only stop the QoS programming call. That is NOT enough:
+# req_start()/req_end() keep re-queueing vote_work/unvote_work for every block
+# request, and with the body no longer doing any work the pair degenerates into
+# a pure busy loop. Measured on device 2026-11-18 22:25 (nvtfix11): 57 unvote +
+# 56 vote work starts in 8ms, the CPU never idles, the SoC watchdog barks and
+# the device hard-resets even without any suspend involved. So the queueing
+# itself has to be gated.
+q1 = ('\t\tgroup->state = PM_QOS_REQ_VOTE;\n'
+      '\t\tqueue_work(host->pm_qos.workq, &group->vote_work);\n')
+q1b = ('\t\tgroup->state = PM_QOS_REQ_VOTE;\n'
+       '\t\t/* USG_UFSQOS: never arm the vote work when the feature is off,\n'
+       '\t\t * otherwise the vote/unvote pair degenerates into a busy loop. */\n'
+       '\t\tif (ufs_qcom_pm_qos_enable)\n'
+       '\t\t\tqueue_work(host->pm_qos.workq, &group->vote_work);\n')
+if s.count(q1) != 1:
+    print('[FATAL] UFSQOS: vote queue anchor count %d' % s.count(q1)); sys.exit(1)
+s = s.replace(q1, q1b, 1)
+
+q2 = ('\tgroup->state = PM_QOS_REQ_UNVOTE;\n'
+      '\tqueue_work(host->pm_qos.workq, &group->unvote_work);\n')
+q2b = ('\tgroup->state = PM_QOS_REQ_UNVOTE;\n'
+       '\tif (ufs_qcom_pm_qos_enable)\n'
+       '\t\tqueue_work(host->pm_qos.workq, &group->unvote_work);\n')
+if s.count(q2) != 1:
+    print('[FATAL] UFSQOS: unvote queue anchor count %d' % s.count(q2)); sys.exit(1)
+s = s.replace(q2, q2b, 1)
+
 open(p, 'w', encoding='utf-8').write(s)
 print('[patch] USG_UFSQOS applied: UFS PM QoS votes disabled by default')
 PY
