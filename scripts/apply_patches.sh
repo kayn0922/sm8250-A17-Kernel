@@ -182,20 +182,6 @@ if os.environ.get('USG_CAPTURE') == '1':
     })
 elif os.environ.get('USG_DISABLE') != '1':
     want['CONFIG_UNPLUG_SUSPEND_GUARD'] = 'y'
-
-# USG_NOKBD: disable the Xiaomi pogo keyboard driver.
-# On-device evidence (2026-11-17): with no keyboard attached, the driver still
-# fires "xiaomi_keyboard_irq_func: keyboard event: wakeup system" roughly every
-# 300ms (IRQ 548 / MiKB-IRQ, gpio 83). During system suspend this raises a
-# PM wakeup event, so dpm_suspend aborts with
-#   "PM: Some devices failed to suspend, or early wake event detected"
-# and Android retries until the watchdog resets the board.
-# The user does not use the pogo keyboard, so removing the driver is the
-# cleanest fix.
-if os.environ.get('USG_NOKBD') == '1':
-    want['CONFIG_XIAOMI_KEYBOARD'] = 'n'
-    print('[patch] NOKBD: CONFIG_XIAOMI_KEYBOARD=n (pogo keyboard driver disabled)')
-
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
 keys = set(want)
@@ -750,92 +736,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# USG_NOKBD2: kill the Xiaomi pogo keyboard driver at the source.
-#
-# Why the config approach failed (2026-11-17):
-#   `CONFIG_XIAOMI_KEYBOARD=n` in the defconfig does NOT stick: the symbol is
-#   force-selected by another Kconfig entry, so olddefconfig restores =y and the
-#   driver still probes ("[xiaomi-keyboard] xiaomi_keyboard_probe 504: enter").
-#
-# Real evidence from the driver source:
-#   static irqreturn_t xiaomi_keyboard_irq_func(...)
-#   {
-#           MI_KB_INFO("keyboard event: wakeup system\n");
-#           pm_wakeup_event(&mdata->pdev->dev, 500);   <-- 500 ms wakeup event
-#   }
-#   and xiaomi_keyboard_pm_suspend() calls enable_irq_wake(mdata->irq).
-#
-# With no keyboard attached the pogo pins float, the IRQ fires roughly every
-# 300 ms, each firing re-arms a 500 ms wakeup event, so the event never expires
-# and pm_wakeup_pending() is always true.  dpm_suspend() then aborts with
-#   "PM: Some devices failed to suspend, or early wake event detected" (-EBUSY)
-# Android retries forever and the watchdog hard-resets the board.
-#
-# Fix: make xiaomi_keyboard_probe() return -ENODEV immediately, so no IRQ is
-# requested and no wakeup source is registered.  The user does not use the
-# keyboard, so nothing is lost.
-# ---------------------------------------------------------------------------
-if [ "${USG_NOKBD2:-0}" = "1" ]; then
-python3 - "$KDIR_ABS" <<'PY'
-import sys, os
-root = sys.argv[1]
-cands = [
-    'drivers/input/misc/xiaomi_keyboard/xiaomi_keyboard.c',
-    'drivers/input/misc/xiaomi_keyboard.c',
-    'drivers/misc/xiaomi_keyboard/xiaomi_keyboard.c',
-    'drivers/misc/xiaomi_keyboard.c',
-    'drivers/platform/xiaomi/xiaomi_keyboard.c',
-    'drivers/input/keyboard/xiaomi_keyboard.c',
-]
-sig = 'static int xiaomi_keyboard_probe(struct platform_device *pdev)'
-anchor = '\tint ret = 0;\n\tMI_KB_INFO("enter\\n");\n'
-inject = (
-    '\n\t/* USG_NOKBD2: pogo keyboard not present. Its IRQ handler calls\n'
-    '\t * pm_wakeup_event(dev, 500) on every floating-pin interrupt, which\n'
-    '\t * keeps a PM wakeup event permanently armed and makes every system\n'
-    '\t * suspend abort with -EBUSY (then the watchdog hard-resets).\n'
-    '\t * Refuse to probe so no IRQ / wakeup source is ever registered.\n'
-    '\t */\n'
-    '\treturn -ENODEV;\n')
-patched = []
-for rel in cands:
-    p = os.path.join(root, rel)
-    if not os.path.exists(p):
-        continue
-    s = open(p, encoding='utf-8').read()
-    if 'USG_NOKBD2' in s:
-        print('[patch] USG_NOKBD2 already applied in %s' % rel)
-        patched.append(rel)
-        continue
-    if s.count(sig) != 1:
-        print('[patch] NOKBD2: %s probe signature count %d, skipped' % (rel, s.count(sig)))
-        continue
-    i = s.find(sig)
-    j = s.find(anchor, i)
-    if j < 0:
-        print('[patch] NOKBD2: %s probe body anchor not found after signature' % rel)
-        continue
-    k = j + len(anchor)
-    s = s[:k] + inject + s[k:]
-    open(p, 'w', encoding='utf-8').write(s)
-    print('[patch] USG_NOKBD2 applied in %s (probe -> -ENODEV)' % rel)
-    patched.append(rel)
-if not patched:
-    print('[FATAL] NOKBD2: no xiaomi_keyboard.c matched any known path')
-    sys.exit(1)
-print('[patch] NOKBD2: patched %d file(s)' % len(patched))
-PY
-    if grep -rqs "USG_NOKBD2" "$KDIR_ABS/drivers/input/misc/" "$KDIR_ABS/drivers/misc/" "$KDIR_ABS/drivers/platform/"; then
-        echo "[patch] CONFIRMED: pogo keyboard driver disabled at probe (NOKBD2) ACTIVE"
-    else
-        echo "[FATAL] USG_NOKBD2 not applied!"
-        exit 1
-    fi
-else
-    echo "[patch] USG_NOKBD2 not requested (stock xiaomi_keyboard.c kept)"
-fi
-
-# ---------------------------------------------------------------------------
 # USG_NVTFIX: stop the Novatek touch driver from issuing SPI transfers during
 # system suspend (elish/enuma, kernel 4.19.325-cip).
 #
@@ -974,6 +874,109 @@ PY
     fi
 else
     echo "[patch] USG_SHALLOW not requested (stock kernel/power/suspend.c kept)"
+fi
+
+# ---------------------------------------------------------------------------
+# USG_REBINDFIX: make NVT driver unbind/rebind clean and crash-free.
+#
+# Root cause (confirmed on device 2026-11-18 via ramoops Oops):
+#   1) nvt_extra_proc_deinit() creates 14 /proc nodes but only removes 13 -
+#      it forgets "tp_lockdown_info". After the first unbind this node stays.
+#   2) On rebind, nvt_extra_proc_init() re-creates that node -> -12 (EEXIST)
+#      -> nvt_ts_probe() jumps to its error path -> kfree(ts); ts=NULL.
+#   3) The other 13 /proc nodes WERE recreated, and their open callbacks use
+#      the GLOBAL ts pointer. A user-space `cat /proc/nvt_fw_version` then hits
+#      nvt_fw_version_open() -> mutex_lock(&ts->lock) with ts == NULL ->
+#      NULL deref at +0x308 -> kernel Oops -> panic -> hard reboot.
+#
+# Fix:
+#   a) deinit() also removes tp_lockdown_info (root cause; clean rebind)
+#   b) every proc callback that dereferences ts guards `if (!ts) return ...`
+#      (defence in depth: a future probe failure can no longer Oops)
+# ---------------------------------------------------------------------------
+if [ "${USG_REBINDFIX:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_ext_proc.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_REBINDFIX' in s:
+    print('[patch] USG_REBINDFIX already applied to ext_proc')
+    sys.exit(0)
+
+changed = []
+# (a) root cause: remove the forgotten tp_lockdown_info node in deinit()
+anchor = ('\tif (NVT_proc_game_mode_switch_entry != NULL) {\n'
+          '\t\tremove_proc_entry(NVT_GAME_MODE_SWITCH, NULL);\n'
+          '\t\tNVT_proc_game_mode_switch_entry = NULL;\n'
+          '\t\tNVT_LOG("Removed /proc/%s\\n", NVT_GAME_MODE_SWITCH);\n'
+          '\t}\n'
+          '}\n'
+          '#endif\n')
+add = ('\tif (NVT_proc_game_mode_switch_entry != NULL) {\n'
+       '\t\tremove_proc_entry(NVT_GAME_MODE_SWITCH, NULL);\n'
+       '\t\tNVT_proc_game_mode_switch_entry = NULL;\n'
+       '\t\tNVT_LOG("Removed /proc/%s\\n", NVT_GAME_MODE_SWITCH);\n'
+       '\t}\n'
+       '\n'
+       '\t/* USG_REBINDFIX: deinit() also removes tp_lockdown_info, which\n'
+       '\t * init() creates. Without this the node survives unbind and the\n'
+       '\t * next probe fails -12, freeing ts while /proc nodes still use it. */\n'
+       '\tif (NVT_proc_xiaomi_lockdown_info_entry != NULL) {\n'
+       '\t\tremove_proc_entry(NVT_XIAOMI_LOCKDOWN_INFO, NULL);\n'
+       '\t\tNVT_proc_xiaomi_lockdown_info_entry = NULL;\n'
+       '\t\tNVT_LOG("Removed /proc/%s\\n", NVT_XIAOMI_LOCKDOWN_INFO);\n'
+       '\t}\n'
+       '}\n'
+       '#endif\n')
+n = s.count(anchor)
+if n != 1:
+    print('[FATAL] REBINDFIX deinit anchor count %d (expected 1)' % n); sys.exit(1)
+s = s.replace(anchor, add, 1)
+changed.append('deinit removes tp_lockdown_info')
+
+# (b) defence in depth: guard every proc callback that locks ts->lock
+lock = '\tif (mutex_lock_interruptible(&ts->lock)) {\n'
+guard = ('\t/* USG_REBINDFIX: ts may be freed by a failed rebind probe; never\n'
+         '\t * dereference it from a /proc callback (use-after-free -> panic). */\n'
+         '\tif (!ts)\n'
+         '\t\treturn -ENODEV;\n'
+         '\tif (mutex_lock_interruptible(&ts->lock)) {\n')
+cnt = s.count(lock)
+if cnt < 1:
+    print('[FATAL] REBINDFIX: no mutex_lock anchor found'); sys.exit(1)
+s = s.replace(lock, guard)
+changed.append('guarded %d ts->lock callbacks' % cnt)
+
+# (c) guard the lockdown_info show callback (uses ts->lockdown_info directly)
+show_anchor = ('static int nvt_xiaomi_lockdown_info_show(struct seq_file *m, void *v)\n'
+               '{\n'
+               '\tint ret;\n'
+               '\n'
+               '\tret = dsi_panel_lockdown_info_read(ts->lockdown_info);\n')
+show_new = ('static int nvt_xiaomi_lockdown_info_show(struct seq_file *m, void *v)\n'
+            '{\n'
+            '\tint ret;\n'
+            '\n'
+            '\t/* USG_REBINDFIX: guard against freed ts after failed rebind */\n'
+            '\tif (!ts)\n'
+            '\t\treturn -ENODEV;\n'
+            '\n'
+            '\tret = dsi_panel_lockdown_info_read(ts->lockdown_info);\n')
+if s.count(show_anchor) != 1:
+    print('[FATAL] REBINDFIX show anchor count %d' % s.count(show_anchor)); sys.exit(1)
+s = s.replace(show_anchor, show_new, 1)
+changed.append('guarded lockdown_info show')
+
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_REBINDFIX applied to ext_proc: ' + '; '.join(changed))
+PY
+    if grep -q "USG_REBINDFIX: deinit() also removes" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_ext_proc.c"; then
+        echo "[patch] CONFIRMED: USG_REBINDFIX active (tp_lockdown_info removed + NULL guards)"
+    else
+        echo "[FATAL] USG_REBINDFIX failed to apply!"; exit 1
+    fi
+else
+    echo "[patch] USG_REBINDFIX not requested (stock nt36xxx_ext_proc.c kept)"
 fi
 
 echo "[patch] done"
