@@ -1313,4 +1313,76 @@ else
     echo "[patch] USG_UARTNOWAKE not requested"
 fi
 
+# ---------------------------------------------------------------------------
+# USG_UFSQOS: stop the UFS PM-QoS vote/unvote storm during system suspend.
+#
+# Crash evidence (device 2026-11-18 21:13, nvtfix9 kernel, screen-off +
+# `echo mem`): the ftrace dies ~10ms after "PM: suspend entry (deep)", with
+#   suspend_resume: sync_filesystems[0] begin      (no matching end)
+#   wb_workfn / ufshcd_ungate_work / scsi_requeue_run_queue
+#   ufs_qcom_pm_qos_vote_work  x4  +  ufs_qcom_pm_qos_unvote_work x4
+#   cfq_kick_queue / blk_delay_work / wait_rcu_exp_gp
+# i.e. sync_filesystems() starts a huge writeback and the UFS driver keeps
+# re-arming its PM QoS vote/unvote works (8ms apart). Every vote calls
+# pm_qos_update_request(), which reprograms the CPU frequency governor, and
+# that CPU-frequency traffic collides with the in-flight RPMH/IPPC power
+# handshake: the RPMH never completes, the SoC watchdog barks and the PMIC
+# asserts PS_HOLD -> hard reset.
+#
+# Note: system_state is still SYSTEM_RUNNING during ksys_sync() (it only
+# becomes SYSTEM_SUSPEND right before syscore_suspend), so a "am I
+# suspending" test would not catch this window. Instead the QoS votes are
+# simply disabled by default - the only loss is the CPU-latency boost that
+# UFS I/O asks for, which is irrelevant for a tablet.
+#
+# Runtime control: /sys/module/ufs_qcom/parameters/ufs_qcom_pm_qos_enable
+# (1 = restore the stock behaviour, at the risk of the suspend deadlock).
+# ---------------------------------------------------------------------------
+if [ "${USG_NOKBD2:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/scsi/ufs/ufs-qcom.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_UFSQOS' in s:
+    print('[patch] USG_UFSQOS already applied'); sys.exit(0)
+
+inc = '#include "ufs_quirks.h"\n'
+if s.count(inc) != 1:
+    print('[FATAL] UFSQOS: include anchor count %d' % s.count(inc)); sys.exit(1)
+decl = ('#include "ufs_quirks.h"\n'
+        '\n'
+        '/* USG_UFSQOS: the UFS PM QoS vote/unvote storm deadlocks the RPMH\n'
+        ' * power handshake during system suspend (watchdog -> PS_HOLD hard\n'
+        ' * reset). Disable the votes by default; 1 restores stock behaviour.\n'
+        ' */\n'
+        'static bool ufs_qcom_pm_qos_enable;\n'
+        'module_param(ufs_qcom_pm_qos_enable, bool, 0644);\n'
+        'MODULE_PARM_DESC(ufs_qcom_pm_qos_enable,\n'
+        '        "UFS PM QoS CPU-latency votes (1=stock, 0=off: avoids suspend deadlock)");\n')
+s = s.replace(inc, decl, 1)
+
+a1 = '\tif (!host->pm_qos.is_enabled || !group->active_reqs) {\n'
+b1 = '\tif (!ufs_qcom_pm_qos_enable || !host->pm_qos.is_enabled || !group->active_reqs) {\n'
+if s.count(a1) != 1:
+    print('[FATAL] UFSQOS: vote guard anchor count %d' % s.count(a1)); sys.exit(1)
+s = s.replace(a1, b1, 1)
+
+a2 = '\tif (!host->pm_qos.is_enabled || group->active_reqs) {\n'
+b2 = '\tif (!ufs_qcom_pm_qos_enable || !host->pm_qos.is_enabled || group->active_reqs) {\n'
+if s.count(a2) != 1:
+    print('[FATAL] UFSQOS: unvote guard anchor count %d' % s.count(a2)); sys.exit(1)
+s = s.replace(a2, b2, 1)
+
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_UFSQOS applied: UFS PM QoS votes disabled by default')
+PY
+    if grep -q "USG_UFSQOS" "$KDIR_ABS/drivers/scsi/ufs/ufs-qcom.c" 2>/dev/null; then
+        echo "[patch] CONFIRMED: USG_UFSQOS active (UFS PM QoS votes off -> no suspend deadlock)"
+    else
+        echo "[WARN] USG_UFSQOS not applied (source file missing?)"
+    fi
+else
+    echo "[patch] USG_UFSQOS not requested"
+fi
+
 echo "[patch] done"
