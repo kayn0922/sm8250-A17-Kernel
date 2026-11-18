@@ -1070,13 +1070,21 @@ fi
 #   AFTER nvt_update_firmware(), so fw_ver is still 0 when the guard runs ->
 #   the "skip when fw_ver!=0" branch never fired.
 #
-# Fix v2:
-#   Add a runtime-switchable module_param `nvt_skip_boot_fwupdate`, default=1
-#   (skip). Boot_Update_Firmware() returns immediately when it is set, so no
-#   reflash / no 15s dead-touch. To restore stock behaviour at runtime without
-#   reflashing the kernel:
-#       echo 0 > /sys/module/*/parameters/nvt_skip_boot_fwupdate
-#   (then trigger a rebind; set back to 1 to skip again).
+# Fix v2 (REJECTED on device 2026-11-18): skipping the upload entirely left
+#   touch permanently dead - after a rebind the IC comes up with fw_ver=0 and
+#   only reports touches again once the firmware image is uploaded again.
+#   Evidence: with skip=1, get_lockdown_info still succeeded over SPI
+#   (Lockdown:0x53,0x42) but the touch IRQ count stayed 0 forever; setting
+#   nvt_skip_boot_fwupdate=0 and rebinding printed
+#   "Update firmware success! <152198 us>" + fw_ver=0x1A and touch returned.
+#
+# Fix v3 (current): keep the upload, shorten the wait.
+#   - nvt_skip_boot_fwupdate default is now 0 (firmware still uploads);
+#     keep it as a diagnostics-only switch.
+#   - the hardcoded 15000ms delay becomes module_param `nvt_fwu_delay_ms`,
+#     default 200ms. Since the upload itself only takes ~150ms, touch is back
+#     ~350ms after the rebind instead of ~16s. Tunable at runtime:
+#       echo 200 > /sys/module/*/parameters/nvt_fwu_delay_ms
 # ---------------------------------------------------------------------------
 if [ "${USG_SKIPFWUPD:-0}" = "1" ]; then
 python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c" <<'PY'
@@ -1104,14 +1112,16 @@ a1 = ('#if BOOT_UPDATE_FIRMWARE\n'
       '#define SIZE_4KB 4096\n')
 b1 = ('#if BOOT_UPDATE_FIRMWARE\n'
       '\n'
-      '/* USG_SKIPFWUPD v2: runtime-switchable skip of the 15s delayed boot\n'
-      ' * firmware reflash. 1=skip (default, removes ~16s dead-touch after every\n'
-      ' * unbind/rebind); 0=allow stock reflash. Change at runtime through the\n'
-      ' * module parameter nvt_skip_boot_fwupdate under sysfs (no reflash). */\n'
-      'static int nvt_skip_boot_fwupdate = 1;\n'
+      '/* USG_SKIPFWUPD v3: the post-probe firmware reflash is NOT redundant.\n'
+      ' * After every unbind/rebind the IC comes up with fw_ver=0 and only\n'
+      ' * reports touches again once the firmware image is uploaded, so v2\n'
+      ' * (default skip) left touch permanently dead. Default is therefore 0\n'
+      ' * (allow) and the 15s delay itself is shortened via nvt_fwu_delay_ms\n'
+      ' * in nt36xxx.c. Set this to 1 only for special diagnostics. */\n'
+      'static int nvt_skip_boot_fwupdate = 0;\n'
       'module_param(nvt_skip_boot_fwupdate, int, 0644);\n'
       'MODULE_PARM_DESC(nvt_skip_boot_fwupdate,\n'
-      '    "Skip 15s boot firmware reflash (1=skip/default, 0=allow)");\n'
+      '    "Skip boot firmware reflash entirely (0=allow/default, 1=skip)");\n'
       '\n'
       '#define SIZE_4KB 4096\n')
 n1 = s.count(a1)
@@ -1125,9 +1135,9 @@ a2 = ('void Boot_Update_Firmware(struct work_struct *work)\n'
       '\tnvt_match_fw();\n')
 b2 = ('void Boot_Update_Firmware(struct work_struct *work)\n'
       '{\n'
-      '\t/* USG_SKIPFWUPD v2: default skip the redundant 15s reflash of the\n'
-      '\t * same firmware that makes touch dead for ~16s after every rebind.\n'
-      '\t * Set nvt_skip_boot_fwupdate=0 at runtime to restore stock path. */\n'
+      '\t/* USG_SKIPFWUPD v3: diagnostics-only hard skip of the boot firmware\n'
+      '\t * upload. MUST stay 0 in normal use - without the upload the IC keeps\n'
+      '\t * fw_ver=0 after a rebind and never reports touches again. */\n'
       '\tif (nvt_skip_boot_fwupdate) {\n'
       '\t\tNVT_LOG("USG_SKIPFWUPD: skip boot firmware update (param=%d)\\n",\n'
       '\t\t\tnvt_skip_boot_fwupdate);\n'
@@ -1139,12 +1149,52 @@ if n2 != 1:
     print('[FATAL] SKIPFWUPD Boot_Update_Firmware anchor count %d (expected 1)' % n2); sys.exit(1)
 s = s.replace(a2, b2, 1)
 open(p, 'w', encoding='utf-8').write(s)
-print('[patch] USG_SKIPFWUPD v2 applied: module_param skip (default=1) + early return')
+print('[patch] USG_SKIPFWUPD v3 applied to fw_update: module_param default=0 (allow)')
 PY
-    if grep -q "nvt_skip_boot_fwupdate" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c" && grep -q "USG_SKIPFWUPD v2" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c"; then
-        echo "[patch] CONFIRMED: USG_SKIPFWUPD v2 active (module_param default=skip, runtime reversible)"
+python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_FWUDELAY' in s:
+    print('[patch] USG_FWUDELAY already applied')
+    sys.exit(0)
+
+# (a) declare runtime-tunable boot-firmware delay (ms) at file scope
+a0 = ('#if BOOT_UPDATE_FIRMWARE\n'
+      'static struct workqueue_struct *nvt_fwu_wq;\n')
+b0 = ('#if BOOT_UPDATE_FIRMWARE\n'
+      '/* USG_FWUDELAY: how long to wait after probe before the boot firmware\n'
+      ' * upload runs. Stock is 15000ms, which is the entire "screen on but no\n'
+      ' * touch" window - the upload itself only takes ~150ms. Default 200ms. */\n'
+      'static int nvt_fwu_delay_ms = 200;\n'
+      'module_param(nvt_fwu_delay_ms, int, 0644);\n'
+      'MODULE_PARM_DESC(nvt_fwu_delay_ms,\n'
+      '    "Delay before boot firmware upload, ms (default 200, stock 15000)");\n'
+      'static struct workqueue_struct *nvt_fwu_wq;\n')
+n0 = s.count(a0)
+if n0 != 1:
+    print('[FATAL] USG_FWUDELAY wq anchor count %d (expected 1)' % n0); sys.exit(1)
+s = s.replace(a0, b0, 1)
+
+# (b) use the tunable instead of the hardcoded 15s
+a1 = '\tqueue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, msecs_to_jiffies(15000));'
+b1 = '\tqueue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, msecs_to_jiffies(nvt_fwu_delay_ms));'
+n1 = s.count(a1)
+if n1 != 1:
+    print('[FATAL] USG_FWUDELAY queue anchor count %d (expected 1)' % n1); sys.exit(1)
+s = s.replace(a1, b1, 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_FWUDELAY applied: boot fw upload delay 15000ms -> nvt_fwu_delay_ms (200ms)')
+PY
+    if grep -q "nvt_skip_boot_fwupdate" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c" && grep -q "USG_SKIPFWUPD v3" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c"; then
+        echo "[patch] CONFIRMED: USG_SKIPFWUPD v3 active (skip param default=0 -> firmware still uploads)"
     else
-        echo "[FATAL] USG_SKIPFWUPD v2 failed to apply!"; exit 1
+        echo "[FATAL] USG_SKIPFWUPD v3 failed to apply!"; exit 1
+    fi
+    if grep -q "nvt_fwu_delay_ms" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx.c" && ! grep -q "msecs_to_jiffies(15000)" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx.c"; then
+        echo "[patch] CONFIRMED: USG_FWUDELAY active (15000ms delay replaced by nvt_fwu_delay_ms=200)"
+    else
+        echo "[FATAL] USG_FWUDELAY failed to apply!"; exit 1
     fi
 else
     echo "[patch] USG_SKIPFWUPD not requested (stock boot firmware update kept)"
