@@ -1054,4 +1054,60 @@ else
     echo "[patch] USG_REBINDFIX not requested (stock nt36xxx files kept)"
 fi
 
+# ---------------------------------------------------------------------------
+# USG_SKIPFWUPD: eliminate the ~15s dead-touch window after every rebind.
+#
+# Root cause (confirmed on device 2026-11-18 via dmesg + user timing):
+#   nvt_ts_probe() queues Boot_Update_Firmware() with a 15000ms delay:
+#       queue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, msecs_to_jiffies(15000));
+#   15s after EVERY probe (incl. every unbind/rebind), that work calls
+#   nvt_update_firmware() and reflashes the SAME firmware the IC already runs
+#   (fw_ver=0x1A). During the reflash/bootloader handshake the IC does not
+#   report touches -> ~16s of "screen on but no touch" after each power-on.
+#
+# Fix:
+#   In Boot_Update_Firmware(), if the IC already reports a non-zero fw_ver
+#   (i.e. valid firmware loaded by probe), skip the reflash. Only fall back
+#   to the original upgrade path when fw_ver==0 (blank/corrupt IC), so a
+#   genuinely broken panel can still recover.
+# ---------------------------------------------------------------------------
+if [ "${USG_SKIPFWUPD:-0}" = "1" ]; then
+python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_SKIPFWUPD' in s:
+    print('[patch] USG_SKIPFWUPD already applied to fw_update')
+    sys.exit(0)
+
+anchor = ('void Boot_Update_Firmware(struct work_struct *work)\n'
+          '{\n'
+          '\tnvt_match_fw();\n')
+add = ('void Boot_Update_Firmware(struct work_struct *work)\n'
+       '{\n'
+       '\t/* USG_SKIPFWUPD: probe already loaded valid firmware (fw_ver!=0).\n'
+       '\t * The stock 15s delayed reflash of the same FW makes touch dead\n'
+       '\t * for ~15s after every unbind/rebind. Skip it when FW is healthy;\n'
+       '\t * still upgrade when fw_ver==0 (blank/corrupt IC) for safety. */\n'
+       '\tif (ts && ts->fw_ver) {\n'
+       '\t\tNVT_LOG("fw_ver=0x%02X valid, skip boot firmware update\\n", ts->fw_ver);\n'
+       '\t\treturn;\n'
+       '\t}\n'
+       '\tnvt_match_fw();\n')
+n = s.count(anchor)
+if n != 1:
+    print('[FATAL] SKIPFWUPD Boot_Update_Firmware anchor count %d (expected 1)' % n); sys.exit(1)
+s = s.replace(anchor, add, 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_SKIPFWUPD applied to nt36xxx_fw_update.c: skip redundant reflash when fw healthy')
+PY
+    if grep -q "USG_SKIPFWUPD" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_fw_update.c"; then
+        echo "[patch] CONFIRMED: USG_SKIPFWUPD active (Boot_Update_Firmware skips reflash when fw_ver!=0)"
+    else
+        echo "[FATAL] USG_SKIPFWUPD failed to apply!"; exit 1
+    fi
+else
+    echo "[patch] USG_SKIPFWUPD not requested (stock boot firmware update kept)"
+fi
+
 echo "[patch] done"

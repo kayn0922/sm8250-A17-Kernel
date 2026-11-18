@@ -28,11 +28,11 @@ on:
         type: choice
         options: [none, dagu-minimal-node]
       build_mode:
-        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF; spifix = clean + spi_geni fix; spifix1 = spifix + 0001 GNSS fix; spifix2 = spifix1 + geni-serial noirq fix; spifix3 = spifix2 + force runtime suspend/resume of both GENI devices; spifix4 = spifix3 + shallow WFI suspend (skip vendor SoC power collapse); nvtfix = spi_geni force-rpm + NVT suspend gesture-disable (no geni-serial noirq change); nvtfix2 = nvtfix + geni-serial noirq fix (998000.qup_uart -EBUSY); nvtfix3 = nvtfix2 + pogo keyboard CONFIG off (did not stick); nvtfix4 = nvtfix2 + pogo keyboard probe forcibly ENODEV; nvtfix5 = nvtfix4 + 0002 charger-watchdog + 0003 cgroup-freezer root fixes restored (USG_CLEAN=0); rebindfix = guard base + NVT proc-node unbind/rebind crash fix (tp_lockdown_info leak + UAF NULL guards) for screen-off unbind / screen-on rebind'
+        description: 'stable = 0001/0002/0003 ON + guard OFF; clean = ALL patches OFF + guard OFF; guard = patches ON + wakelock guard ON (verified daily driver); capture = patches OFF + debug ON; bisect = clean/capture base + external SDX55M stack OFF; spifix = clean + spi_geni fix; spifix1 = spifix + 0001 GNSS fix; spifix2 = spifix1 + geni-serial noirq fix; spifix3 = spifix2 + force runtime suspend/resume of both GENI devices; spifix4 = spifix3 + shallow WFI suspend (skip vendor SoC power collapse); nvtfix = spi_geni force-rpm + NVT suspend gesture-disable (no geni-serial noirq change); nvtfix2 = nvtfix + geni-serial noirq fix (998000.qup_uart -EBUSY); nvtfix3 = nvtfix2 + pogo keyboard CONFIG off (did not stick); nvtfix4 = nvtfix2 + pogo keyboard probe forcibly ENODEV; nvtfix5 = nvtfix4 + 0002 charger-watchdog + 0003 cgroup-freezer root fixes restored (USG_CLEAN=0); rebindfix = guard base + NVT proc-node unbind/rebind crash fix (tp_lockdown_info leak + UAF NULL guards) for screen-off unbind / screen-on rebind; rebindfix2 = rebindfix + skip the 15s delayed boot firmware reflash that kills touch for ~16s after each rebind'
         required: true
         default: 'stable'
         type: choice
-        options: [stable, clean, guard, capture, bisect, spifix, spifix1, spifix2, spifix3, spifix4, nvtfix, nvtfix2, nvtfix3, nvtfix4, nvtfix5, rebindfix]
+        options: [stable, clean, guard, capture, bisect, spifix, spifix1, spifix2, spifix3, spifix4, nvtfix, nvtfix2, nvtfix3, nvtfix4, nvtfix5, rebindfix, rebindfix2]
 
 permissions:
   contents: write
@@ -104,7 +104,8 @@ jobs:
           USG_NVTFIX: ${{ (inputs.build_mode == 'nvtfix' || (inputs.build_mode == 'nvtfix2' || (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5'))) && '1' || '' }}
           USG_NOKBD: ${{ (inputs.build_mode == 'nvtfix3' || inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5') && '1' || '' }}
           USG_NOKBD2: ${{ (inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5') && '1' || '' }}
-          USG_REBINDFIX: ${{ inputs.build_mode == 'rebindfix' && '1' || '' }}
+          USG_REBINDFIX: ${{ (inputs.build_mode == 'rebindfix' || inputs.build_mode == 'rebindfix2') && '1' || '' }}
+          USG_SKIPFWUPD: ${{ inputs.build_mode == 'rebindfix2' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 
