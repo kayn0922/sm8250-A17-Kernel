@@ -1236,23 +1236,25 @@ n = s.count(a)
 if n != 1:
     print('[FATAL] KBDNOWAKE anchor count %d (expected 1)' % n); sys.exit(1)
 s = s.replace(a, b, 1)
-# (b) refuse to bind when no keyboard is attached: the connector IRQ fires
-#     continuously and every hit calls pm_wakeup_event(), which aborts the
-#     CPU freeze during system suspend.
-a2 = 'static int xiaomi_keyboard_probe(struct platform_device *pdev)\n{\n'
-b2 = ('static int xiaomi_keyboard_probe(struct platform_device *pdev)\n'
-      '{\n'
-      '\t/* USG_KBDNOWAKE: with no keyboard attached the pogo connector floods\n'
-      '\t * its IRQ with noise and every hit calls pm_wakeup_event(), which\n'
-      '\t * aborts system suspend ("Wakeup pending. Abort CPU freeze").\n'
-      '\t * Refuse to bind. */\n'
-      '\treturn -ENODEV;\n')
+# (b) the pogo connector IRQ fires continuously when no keyboard is attached
+#     and every hit calls pm_wakeup_event(), which aborts the CPU freeze
+#     during system suspend ("Wakeup pending. Abort CPU freeze").
+#     The keyboard must keep working, so only skip the wakeup event while
+#     the system is suspended; the power key stays the wake source.
+a2 = '\tpm_wakeup_event(&mdata->pdev->dev, 500);\n'
+b2 = ('\t/* USG_KBDNOWAKE: with no keyboard attached the pogo connector floods\n'
+      '\t * this IRQ with noise and every hit calls pm_wakeup_event(), which\n'
+      '\t * aborts system suspend ("Wakeup pending. Abort CPU freeze"). The\n'
+      '\t * keyboard keeps working normally; it just stops generating wakeup\n'
+      '\t * events while the system is suspended. */\n'
+      '\tif (!mdata->dev_pm_suspend)\n'
+      '\t\tpm_wakeup_event(&mdata->pdev->dev, 500);\n')
 n2 = s.count(a2)
 if n2 != 1:
-    print('[FATAL] KBDNOWAKE probe anchor count %d (expected 1)' % n2); sys.exit(1)
+    print('[FATAL] KBDNOWAKE pm_wakeup_event anchor count %d (expected 1)' % n2); sys.exit(1)
 s = s.replace(a2, b2, 1)
 open(p, 'w', encoding='utf-8').write(s)
-print('[patch] USG_KBDNOWAKE applied: keyboard driver does not bind + no irq wakeup')
+print('[patch] USG_KBDNOWAKE applied: keyboard works, no wakeup events during suspend')
 PY
     if grep -q "USG_KBDNOWAKE" "$KDIR_ABS/drivers/input/misc/xiaomi_keyboard/xiaomi_keyboard.c" 2>/dev/null; then
         echo "[patch] CONFIRMED: USG_KBDNOWAKE active (keyboard not a wakeup source, power key still wakes)"
