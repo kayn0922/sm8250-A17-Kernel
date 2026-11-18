@@ -975,8 +975,83 @@ PY
     else
         echo "[FATAL] USG_REBINDFIX failed to apply!"; exit 1
     fi
+
+    # ---------------------------------------------------------------
+    # REBINDFIX part 2: nt36xxx_mp_ctrlram.c
+    # Second unbind/rebind blocker found on-device 2026-11-18:
+    #   nvt_mp_proc_init() creates nvt_selftest + tp_selftest; remove()
+    #   path does not reliably delete them (entry pointers get NULLed or
+    #   the deinit is skipped). On rebind, proc_create() returns -EEXIST
+    #   -> probe fails -1 -> rebind broken (no touch).
+    # Same class for nvt_test_data.
+    # Fix: make all three creates idempotent by removing any stale node
+    # first; also delete tp_selftest in nvt_mp_proc_deinit().
+    # ---------------------------------------------------------------
+python3 - "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_mp_ctrlram.c" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'USG_REBINDFIX' in s:
+    print('[patch] USG_REBINDFIX already applied to mp_ctrlram')
+    sys.exit(0)
+changed = []
+
+# (a) idempotent creates: drop stale proc entries before proc_create
+creates = [
+    ('\tNVT_proc_selftest_entry = proc_create("nvt_selftest", 0444, NULL, &nvt_selftest_fops);\n',
+     '\tNVT_proc_test_data_entry = proc_create("nvt_test_data", 0, NULL, &nvt_test_data_fops);\n'),
+]
+# nvt_selftest
+a1 = '\tNVT_proc_selftest_entry = proc_create("nvt_selftest", 0444, NULL, &nvt_selftest_fops);\n'
+b1 = ('\t/* USG_REBINDFIX: clear stale node from a prior unbind so rebind probe succeeds */\n'
+      '\tremove_proc_entry("nvt_selftest", NULL);\n'
+      '\tNVT_proc_selftest_entry = proc_create("nvt_selftest", 0444, NULL, &nvt_selftest_fops);\n')
+if s.count(a1) != 1:
+    print('[FATAL] REBINDFIX mp selftest anchor %d' % s.count(a1)); sys.exit(1)
+s = s.replace(a1, b1, 1); changed.append('idempotent nvt_selftest create')
+
+# tp_selftest
+a2 = '\tNVT_proc_aftersales_test_entry = proc_create("tp_selftest", 0644, NULL, &nvt_aftersales_test_ops);\n'
+b2 = ('\t/* USG_REBINDFIX: clear stale node from a prior unbind so rebind probe succeeds */\n'
+      '\tremove_proc_entry("tp_selftest", NULL);\n'
+      '\tNVT_proc_aftersales_test_entry = proc_create("tp_selftest", 0644, NULL, &nvt_aftersales_test_ops);\n')
+if s.count(a2) != 1:
+    print('[FATAL] REBINDFIX mp tp_selftest anchor %d' % s.count(a2)); sys.exit(1)
+s = s.replace(a2, b2, 1); changed.append('idempotent tp_selftest create')
+
+# nvt_test_data
+a3 = '\tNVT_proc_test_data_entry = proc_create("nvt_test_data", 0, NULL, &nvt_test_data_fops);\n'
+b3 = ('\t/* USG_REBINDFIX: clear stale node from a prior unbind so rebind probe succeeds */\n'
+      '\tremove_proc_entry("nvt_test_data", NULL);\n'
+      '\tNVT_proc_test_data_entry = proc_create("nvt_test_data", 0, NULL, &nvt_test_data_fops);\n')
+if s.count(a3) != 1:
+    print('[FATAL] REBINDFIX mp test_data anchor %d' % s.count(a3)); sys.exit(1)
+s = s.replace(a3, b3, 1); changed.append('idempotent nvt_test_data create')
+
+# (b) deinit also removes tp_selftest (mirrors the init pair)
+a4 = ('\tif (NVT_proc_selftest_entry != NULL) {\n'
+      '\t\tremove_proc_entry("nvt_selftest", NULL);\n'
+      '\t\tNVT_proc_selftest_entry = NULL;\n'
+      '\t\tNVT_LOG("Removed /proc/%s\\n", "nvt_selftest");\n'
+      '\t}\n')
+b4 = a4 + ('\n'
+           '\t/* USG_REBINDFIX: init() also creates tp_selftest; remove it too */\n'
+           '\tremove_proc_entry("tp_selftest", NULL);\n'
+           '\tNVT_proc_aftersales_test_entry = NULL;\n')
+if s.count(a4) != 1:
+    print('[FATAL] REBINDFIX mp deinit anchor %d' % s.count(a4)); sys.exit(1)
+s = s.replace(a4, b4, 1); changed.append('deinit removes tp_selftest')
+
+open(p, 'w', encoding='utf-8').write(s)
+print('[patch] USG_REBINDFIX applied to mp_ctrlram: ' + '; '.join(changed))
+PY
+    if grep -q "USG_REBINDFIX: clear stale node" "$KDIR_ABS/drivers/input/touchscreen/nt36523/nt36xxx_mp_ctrlram.c"; then
+        echo "[patch] CONFIRMED: USG_REBINDFIX active on mp_ctrlram (selftest/tp_selftest/test_data idempotent)"
+    else
+        echo "[FATAL] USG_REBINDFIX mp_ctrlram failed to apply!"; exit 1
+    fi
 else
-    echo "[patch] USG_REBINDFIX not requested (stock nt36xxx_ext_proc.c kept)"
+    echo "[patch] USG_REBINDFIX not requested (stock nt36xxx files kept)"
 fi
 
 echo "[patch] done"
