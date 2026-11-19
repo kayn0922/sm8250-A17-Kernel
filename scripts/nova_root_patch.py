@@ -66,8 +66,14 @@ nova_branch = '''    nova)
         if [ ! -d "KernelSU" ]; then
             git clone https://github.com/SukiSU-Nova/SukiSU-Nova.git -b main --depth=1 KernelSU
         fi
-        # Replicate Nova kernel/setup.sh wiring: symlink kernel/ -> drivers/kernelsu
-        ( cd drivers && ln -sfn "$(realpath --relative-to=drivers KernelSU/kernel)" kernelsu )
+        # Replicate Nova kernel/setup.sh wiring: symlink kernel/ -> drivers/kernelsu.
+        # Use a plain relative path from drivers/ (../KernelSU/kernel). Do NOT cd
+        # into drivers before resolving it: in v1 realpath then looked for
+        # drivers/KernelSU/kernel (nonexistent) and ln failed -> build aborted.
+        if [ ! -d KernelSU/kernel ]; then
+            echo "[nova][FATAL] KernelSU/kernel missing after clone"; ls -la KernelSU | head; exit 1
+        fi
+        ln -sfn ../KernelSU/kernel drivers/kernelsu
         grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || printf '\\nobj-$(CONFIG_KSU) += kernelsu/\\n' >> drivers/Makefile
         grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || sed -i '/endmenu/i\\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
         # Nova's Kbuild queries its self-hosted server for version strings.
