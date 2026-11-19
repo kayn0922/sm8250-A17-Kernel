@@ -76,6 +76,15 @@ nova_branch = '''    nova)
         ln -sfn ../KernelSU/kernel drivers/kernelsu
         grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || printf '\\nobj-$(CONFIG_KSU) += kernelsu/\\n' >> drivers/Makefile
         grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || sed -i '/endmenu/i\\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        # 4.19 compat: Nova core/init.c calls MODULE_IMPORT_NS() (a 5.3+ macro)
+        # in its #else branch. This 4.19 kernel has no such macro, so clang 22
+        # reads it as an implicit-int function and dies on -Werror. The 6.13+
+        # branch is the quoted string form; delete ONLY the unquoted token-form
+        # line so the #else branch becomes empty on 4.19 (no VFS namespace need).
+        sed -i '/MODULE_IMPORT_NS(VFS_internal/d' KernelSU/kernel/core/init.c
+        if grep -q 'MODULE_IMPORT_NS(VFS_internal' KernelSU/kernel/core/init.c; then
+            echo "[nova][FATAL] MODULE_IMPORT_NS compat strip failed"; exit 1
+        fi
         # Nova's Kbuild queries its self-hosted server for version strings.
         # Those calls are cosmetic only; bound them so GitHub Actions cannot
         # hang for minutes on an unreachable host.
