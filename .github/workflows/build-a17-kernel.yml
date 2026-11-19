@@ -14,7 +14,7 @@ on:
         required: true
         default: 'ksu'
         type: choice
-        options: [ksu, rksu, noksu]
+        options: [ksu, rksu, noksu, nova]
       target_system:
         description: 'MIUI/HyperOS MUST use miui (AOSP build blackscreens on HyperOS)'
         required: true
@@ -106,6 +106,9 @@ jobs:
           USG_NOKBD2: ${{ (inputs.build_mode == 'nvtfix4' || inputs.build_mode == 'nvtfix5') && '1' || '' }}
           USG_REBINDFIX: ${{ (inputs.build_mode == 'rebindfix' || inputs.build_mode == 'rebindfix2') && '1' || '' }}
           USG_SKIPFWUPD: ${{ inputs.build_mode == 'rebindfix2' && '1' || '' }}
+          # Root solution: nova swaps ONLY build.sh's root section to SukiSU-Nova
+          # (kprobes hooks, GitHub mirror). Kernel feature patches above are untouched.
+          USG_ROOT_NOVA: ${{ inputs.ksu == 'nova' && '1' || '' }}
         run: |
           bash builder/scripts/apply_patches.sh kernel "${{ inputs.device }}" "${{ inputs.gps_dts_fix }}"
 
@@ -134,7 +137,7 @@ jobs:
           body: |
             Built from `ymdzq/kernel_xiaomi_sm8250_mod@android16-aptusitu`.
             - device: `${{ inputs.device }}`
-            - root: `${{ inputs.ksu }}` (ksu = ReSukiSU + SuSFS + KPM)
+            - root: `${{ inputs.ksu }}` (ksu = ReSukiSU + KPM; nova = SukiSU-Nova kprobes + built-in KPM, same kernel patches)
             - target: `${{ inputs.target_system }}`
             - build_mode: `${{ inputs.build_mode }}`
             - gps_dts_fix: `${{ inputs.gps_dts_fix }}`

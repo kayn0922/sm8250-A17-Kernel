@@ -182,6 +182,21 @@ if os.environ.get('USG_CAPTURE') == '1':
     })
 elif os.environ.get('USG_DISABLE') != '1':
     want['CONFIG_UNPLUG_SUSPEND_GUARD'] = 'y'
+
+# --- SukiSU-Nova root: hard Kconfig dependencies ---------------------------
+# Nova's `config KSU` has `depends on KPROBES && EXT4_FS`, and its KPM is
+# compiled into kernelsu.ko (select KALLSYMS/KALLSYMS_ALL). ReSukiSU (7119)
+# used syscall-hook so none of this was needed. Force them here ONLY when the
+# root solution is Nova, so the 7119 kernel config stays byte-identical.
+if os.environ.get('USG_ROOT_NOVA') == '1':
+    want.update({
+        'CONFIG_KPROBES': 'y',
+        'CONFIG_EXT4_FS': 'y',
+        'CONFIG_KALLSYMS': 'y',
+        'CONFIG_KALLSYMS_ALL': 'y',
+    })
+    print('[patch] SukiSU-Nova root: KPROBES/EXT4_FS/KALLSYMS forced on (kernel defconfig)')
+
 with open(path, encoding='utf-8') as f:
     lines = f.read().splitlines()
 keys = set(want)
@@ -420,6 +435,28 @@ if 'SUSFS_ENABLE=1' in s:
 
 open(p, 'w', encoding='utf-8').write(s)
 PY
+
+# ---------------------------------------------------------------------------
+# SukiSU-Nova root: rewrite ONLY build.sh's root section. The ReSukiSU path
+# above (URL stabilize + SUSFS disable) is harmless for Nova (the legacy hook
+# patch call is skipped below), so we layer the Nova rewrite on top.
+# Nova uses kprobes hooks built into its own source, so the external KPM Image
+# patch and the JackA1ltman syscall-hook patches must NOT run.
+# ---------------------------------------------------------------------------
+if [ "${USG_ROOT_NOVA:-0}" = "1" ]; then
+    NOVA_PATCH="$BUILDER_DIR/scripts/nova_root_patch.py"
+    if [ ! -f "$NOVA_PATCH" ]; then
+        echo "[FATAL] $NOVA_PATCH missing - cannot build SukiSU-Nova"
+        exit 1
+    fi
+    python3 "$NOVA_PATCH" "$KDIR_ABS/build.sh"
+    if grep -q 'SukiSU-Nova is enabled' "$KDIR_ABS/build.sh"; then
+        echo "[patch] CONFIRMED: build.sh root section is SukiSU-Nova"
+    else
+        echo "[FATAL] Nova root rewrite did not land in build.sh!"
+        exit 1
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # unplug_suspend_guard: kernel-space fix for the unplug+deep-sleep reboot.
